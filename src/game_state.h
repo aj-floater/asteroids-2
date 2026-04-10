@@ -9,9 +9,8 @@
 #include <vector>
 
 struct InputState {
-    bool rotateLeft = false;
-    bool rotateRight = false;
-    bool thrust = false;
+    float turnInput = 0.0f;
+    bool thrustForward = false;
 };
 
 struct ColorRgb {

@@ -6,8 +6,8 @@
 
 namespace {
 
-constexpr float kAngularAccelerationRadiansPerSecondSquared = 18.0f;
 constexpr float kAngularDampingPerSecond = 4.2f;
+constexpr float kAngularAccelerationRadiansPerSecondSquared = 18.0f;
 constexpr float kMaxAngularSpeedRadiansPerSecond = 4.4f;
 constexpr float kThrustAcceleration = 75.0f;
 constexpr float kMaxSpeed = 90.0f;
@@ -26,23 +26,15 @@ GameState::GameState() {
 }
 
 void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
-    float turnInput = 0.0f;
-    if (inputState.rotateLeft) {
-        turnInput += 1.0f;
-    }
-    if (inputState.rotateRight) {
-        turnInput -= 1.0f;
-    }
-
     shipState_.angularVelocityRadiansPerSecond +=
-        turnInput * kAngularAccelerationRadiansPerSecondSquared * deltaTimeSeconds;
+        inputState.turnInput * kAngularAccelerationRadiansPerSecondSquared * deltaTimeSeconds;
     shipState_.angularVelocityRadiansPerSecond = std::clamp(
         shipState_.angularVelocityRadiansPerSecond,
         -kMaxAngularSpeedRadiansPerSecond,
         kMaxAngularSpeedRadiansPerSecond
     );
 
-    if (turnInput == 0.0f) {
+    if (std::abs(inputState.turnInput) < 0.001f) {
         const float dampingFactor = std::max(0.0f, 1.0f - kAngularDampingPerSecond * deltaTimeSeconds);
         shipState_.angularVelocityRadiansPerSecond *= dampingFactor;
         if (std::abs(shipState_.angularVelocityRadiansPerSecond) < 0.02f) {
@@ -57,8 +49,9 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
         shipState_.headingRadians = std::fmod(shipState_.headingRadians, kTau) + kTau;
     }
 
-    if (inputState.thrust) {
-        shipState_.velocity += forward_from_angle(shipState_.headingRadians) * (kThrustAcceleration * deltaTimeSeconds);
+    const Vec2 forward = forward_from_angle(shipState_.headingRadians);
+    if (inputState.thrustForward) {
+        shipState_.velocity += forward * (kThrustAcceleration * deltaTimeSeconds);
         const float currentSpeed = length(shipState_.velocity);
         if (currentSpeed > kMaxSpeed) {
             shipState_.velocity = normalize(shipState_.velocity) * kMaxSpeed;

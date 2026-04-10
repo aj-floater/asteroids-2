@@ -11,6 +11,9 @@ namespace {
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 960;
 constexpr float kMaxDeltaTimeSeconds = 1.0f / 20.0f;
+constexpr float kMouseTurnDeadzonePixels = 0.01f;
+constexpr float kPixelsPerTurnIntentUnit = 3.0f;
+constexpr float kMouseTurnIntentDecayPerSecond = 50.0f;
 
 }
 
@@ -33,6 +36,27 @@ void App::framebuffer_resize_callback(GLFWwindow* window, int, int) {
     }
 }
 
+void App::window_focus_callback(GLFWwindow* window, int focused) {
+    auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
+    if (app != nullptr) {
+        app->set_mouse_capture(focused == GLFW_TRUE);
+    }
+}
+
+void App::cursor_position_callback(GLFWwindow* window, double xpos, double) {
+    auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
+    if (app == nullptr || !app->mouseCaptured_) {
+        return;
+    }
+
+    if (app->hasPreviousMousePosition_) {
+        app->pendingMouseDeltaX_ += static_cast<float>(xpos - app->previousMouseX_);
+    } else {
+        app->hasPreviousMousePosition_ = true;
+    }
+    app->previousMouseX_ = xpos;
+}
+
 void App::initialize() {
     if (glfwInit() != GLFW_TRUE) {
         throw std::runtime_error("Failed to initialize GLFW.");
@@ -49,6 +73,9 @@ void App::initialize() {
 
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, framebuffer_resize_callback);
+    glfwSetWindowFocusCallback(window_, window_focus_callback);
+    glfwSetCursorPosCallback(window_, cursor_position_callback);
+    set_mouse_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
 
     try {
         renderer_.initialize(window_);
@@ -76,7 +103,7 @@ void App::main_loop() {
         previousTime = currentTime;
 
         const float deltaTimeSeconds = std::min(frameDuration.count(), kMaxDeltaTimeSeconds);
-        gameState_.update(deltaTimeSeconds, poll_input());
+        gameState_.update(deltaTimeSeconds, poll_input(deltaTimeSeconds));
         renderer_.render(gameState_.ship(), gameState_.flame_particles());
     }
 }
@@ -92,10 +119,55 @@ void App::shutdown() {
     glfwTerminate();
 }
 
-InputState App::poll_input() const {
+InputState App::poll_input(float deltaTimeSeconds) {
     InputState inputState;
-    inputState.rotateLeft = glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS;
-    inputState.rotateRight = glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS;
-    inputState.thrust = glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS;
+    float keyboardTurnInput = 0.0f;
+    if (glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS) {
+        keyboardTurnInput += 1.0f;
+    }
+    if (glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS) {
+        keyboardTurnInput -= 1.0f;
+    }
+
+    if (mouseCaptured_ && std::abs(pendingMouseDeltaX_) >= kMouseTurnDeadzonePixels) {
+        mouseTurnIntent_ += std::clamp(
+            -pendingMouseDeltaX_ / kPixelsPerTurnIntentUnit,
+            -1.0f,
+            1.0f
+        );
+    }
+    pendingMouseDeltaX_ = 0.0f;
+    mouseTurnIntent_ = std::clamp(mouseTurnIntent_, -1.0f, 1.0f);
+
+    inputState.turnInput = std::clamp(mouseTurnIntent_ + keyboardTurnInput, -1.0f, 1.0f);
+
+    inputState.thrustForward =
+        glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS;
+
+    const float decayFactor = std::max(0.0f, 1.0f - kMouseTurnIntentDecayPerSecond * deltaTimeSeconds);
+    mouseTurnIntent_ *= decayFactor;
+    if (std::abs(mouseTurnIntent_) < 0.01f) {
+        mouseTurnIntent_ = 0.0f;
+    }
+
     return inputState;
+}
+
+void App::set_mouse_capture(bool focused) {
+    mouseCaptured_ = focused;
+    glfwSetInputMode(window_, GLFW_CURSOR, focused ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    if (glfwRawMouseMotionSupported() == GLFW_TRUE) {
+        glfwSetInputMode(window_, GLFW_RAW_MOUSE_MOTION, focused ? GLFW_TRUE : GLFW_FALSE);
+    }
+    if (focused) {
+        glfwGetCursorPos(window_, &previousMouseX_, nullptr);
+        hasPreviousMousePosition_ = true;
+        pendingMouseDeltaX_ = 0.0f;
+        mouseTurnIntent_ = 0.0f;
+    } else {
+        hasPreviousMousePosition_ = false;
+        pendingMouseDeltaX_ = 0.0f;
+        mouseTurnIntent_ = 0.0f;
+    }
 }
