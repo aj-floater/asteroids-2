@@ -58,8 +58,8 @@ struct FlameEmitterConfig {
     float maxParticleSpeed = 62.0f;
     float minLifetimeSeconds = 0.14f;
     float maxLifetimeSeconds = 0.4f;
-    float minParticleSize = 0.22f;
-    float maxParticleSize = 1.5f;
+    float minParticleSize = 0.12f;
+    float maxParticleSize = 0.9f;
     std::array<float, 2> startWhiteRange = {0.88f, 1.0f};
     std::array<float, 2> midOrangeRedRange = {0.32f, 0.56f};
     std::array<float, 2> midOrangeGreenRange = {0.48f, 0.72f};

@@ -4,6 +4,7 @@
 
 #include <GLFW/glfw3.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -38,6 +39,10 @@ private:
         float worldHalfExtents[2];
     };
 
+    struct BlurPushConstants {
+        float texelOffset[2];
+    };
+
     struct ParticleVertex {
         float position[2];
         float color[4];
@@ -47,16 +52,27 @@ private:
         static std::array<VkVertexInputAttributeDescription, 3> attribute_descriptions();
     };
 
+    struct OffscreenTarget {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    };
+
     void create_instance();
     void create_surface();
     void pick_physical_device();
     void create_logical_device();
     void create_swapchain();
-    void create_image_views();
-    void create_render_pass();
-    void create_ship_pipeline();
-    void create_particle_pipeline();
+    void create_swapchain_image_views();
+    void create_render_passes();
+    void create_descriptor_set_layouts();
+    void create_samplers();
+    void create_offscreen_targets();
+    void create_pipelines();
     void create_framebuffers();
+    void create_descriptor_pool();
+    void create_descriptor_sets();
     void create_command_pool();
     void create_particle_buffer();
     void create_command_buffers();
@@ -65,9 +81,13 @@ private:
     void cleanup_swapchain();
     void recreate_swapchain();
 
+    void update_descriptor_sets();
     void update_particle_buffer(std::span<const FlameParticleRenderData> flameParticles);
+    void create_offscreen_target(OffscreenTarget& target);
+    void destroy_offscreen_target(OffscreenTarget& target);
     void create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory);
     uint32_t find_memory_type(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
+    void transition_image_to_shader_read(VkCommandBuffer commandBuffer, VkImage image) const;
     void record_command_buffer(
         VkCommandBuffer commandBuffer,
         uint32_t imageIndex,
@@ -101,11 +121,35 @@ private:
     VkFormat swapchainImageFormat_ = VK_FORMAT_UNDEFINED;
     VkExtent2D swapchainExtent_{};
 
-    VkRenderPass renderPass_ = VK_NULL_HANDLE;
+    OffscreenTarget lightTarget_{};
+    OffscreenTarget sceneTarget_{};
+    OffscreenTarget brightTarget_{};
+    std::array<OffscreenTarget, 2> blurTargets_{};
+
+    VkRenderPass lightRenderPass_ = VK_NULL_HANDLE;
+    VkRenderPass sceneRenderPass_ = VK_NULL_HANDLE;
+    VkRenderPass postProcessRenderPass_ = VK_NULL_HANDLE;
+    VkRenderPass compositeRenderPass_ = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayout shipDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout blurDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout compositeDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet shipDescriptorSet_ = VK_NULL_HANDLE;
+    std::array<VkDescriptorSet, 3> blurDescriptorSets_{};
+    VkDescriptorSet compositeDescriptorSet_ = VK_NULL_HANDLE;
+    VkSampler linearSampler_ = VK_NULL_HANDLE;
+
     VkPipelineLayout shipPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline shipPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
-    VkPipeline particlePipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout particleScenePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline particleScenePipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout particleLightPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline particleLightPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout blurPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline blurPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline compositePipeline_ = VK_NULL_HANDLE;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
@@ -123,4 +167,5 @@ private:
     bool framebufferResized_ = false;
 
     static constexpr int kMaxFramesInFlight = 2;
+    static constexpr int kBloomPassCount = 4;
 };

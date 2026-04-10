@@ -19,12 +19,13 @@ vec2 quad_corner(uint index) {
 
 void main() {
     const vec2 worldHalfExtents = vec2(100.0, 75.0);
-    const float visibleGlowQuadScale = 3.5;
+    const float lightRadiusScale = 12.0;
+
     vec2 localCoord = quad_corner(gl_VertexIndex);
     vec2 clipCenter = inPosition / worldHalfExtents;
     vec2 clipOffset = localCoord * vec2(
-        (inSize * visibleGlowQuadScale) / worldHalfExtents.x,
-        (inSize * visibleGlowQuadScale) / worldHalfExtents.y
+        (inSize * lightRadiusScale) / worldHalfExtents.x,
+        (inSize * lightRadiusScale) / worldHalfExtents.y
     );
 
     fragColor = inColor;

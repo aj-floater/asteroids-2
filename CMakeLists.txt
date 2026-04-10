@@ -67,12 +67,62 @@ add_custom_command(
   VERBATIM
 )
 
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle_light.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle_light.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle_light.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle_light.frag"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle_light.vert.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_VERT_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle_light.vert"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle_light.vert.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/particle_light.vert"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/fullscreen.vert.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_VERT_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fullscreen.vert"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/fullscreen.vert.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/fullscreen.vert"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/blur.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/blur.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/blur.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/blur.frag"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/composite.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/composite.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/composite.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/composite.frag"
+  VERBATIM
+)
+
 add_custom_target(asteroids_shaders ALL
   DEPENDS
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.vert.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.frag.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle.vert.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle.frag.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle_light.vert.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle_light.frag.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/fullscreen.vert.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/blur.frag.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/composite.frag.spv"
 )
 
 add_executable(asteroids
