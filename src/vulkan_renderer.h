@@ -14,7 +14,7 @@
 class VulkanRenderer {
 public:
     void initialize(GLFWwindow* window);
-    void render(const ShipState& shipState, std::span<const FlameParticleRenderData> flameParticles);
+    void render(const ShipState& shipState, std::span<const EffectParticleRenderData> particles);
     void handle_resize();
     void shutdown();
 
@@ -46,10 +46,11 @@ private:
     struct ParticleVertex {
         float position[2];
         float color[4];
-        float size = 1.0f;
+        float params0[4] = {1.0f, 0.0f, 1.0f, 0.0f};
+        float params1[4] = {3.5f, 1.0f, 1.0f, 1.0f};
 
         static VkVertexInputBindingDescription binding_description();
-        static std::array<VkVertexInputAttributeDescription, 3> attribute_descriptions();
+        static std::array<VkVertexInputAttributeDescription, 4> attribute_descriptions();
     };
 
     struct OffscreenTarget {
@@ -82,7 +83,7 @@ private:
     void recreate_swapchain();
 
     void update_descriptor_sets();
-    void update_particle_buffer(std::span<const FlameParticleRenderData> flameParticles);
+    void update_particle_buffer(std::span<const EffectParticleRenderData> particles);
     void create_offscreen_target(OffscreenTarget& target);
     void destroy_offscreen_target(OffscreenTarget& target);
     void create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory);
@@ -92,7 +93,7 @@ private:
         VkCommandBuffer commandBuffer,
         uint32_t imageIndex,
         const ShipState& shipState,
-        std::span<const FlameParticleRenderData> flameParticles
+        std::span<const EffectParticleRenderData> particles
     );
 
     QueueFamilyIndices find_queue_families(VkPhysicalDevice device) const;
@@ -157,7 +158,7 @@ private:
     VkBuffer particleBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory particleBufferMemory_ = VK_NULL_HANDLE;
     void* particleBufferMapped_ = nullptr;
-    std::size_t maxParticleCount_ = 512;
+    std::size_t maxParticleCount_ = 1024;
 
     std::vector<VkSemaphore> imageAvailableSemaphores_;
     std::vector<VkSemaphore> renderFinishedSemaphores_;

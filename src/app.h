@@ -26,4 +26,5 @@ private:
     float pendingMouseDeltaX_ = 0.0f;
     float mouseTurnIntent_ = 0.0f;
     bool hasPreviousMousePosition_ = false;
+    bool previousFireHeld_ = false;
 };

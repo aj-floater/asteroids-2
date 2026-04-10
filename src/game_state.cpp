@@ -21,8 +21,8 @@ GameState::GameState() {
     shipState_.headingRadians = std::numbers::pi_v<float> * 0.5f;
     shipState_.angularVelocityRadiansPerSecond = 0.0f;
     rngState_ = flameConfig_.randomSeed;
-    flameParticles_.reserve(flameConfig_.maxParticles);
-    flameParticleRenderData_.reserve(flameConfig_.maxParticles);
+    particles_.reserve(flameConfig_.maxParticles);
+    particleRenderData_.reserve(flameConfig_.maxParticles);
 }
 
 void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
@@ -61,6 +61,10 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
         emissionAccumulator_ = 0.0f;
     }
 
+    if (inputState.firePressed) {
+        emit_laser_shot();
+    }
+
     shipState_.position += shipState_.velocity * deltaTimeSeconds;
     wrap_position(shipState_.position);
     update_particles(deltaTimeSeconds);
@@ -70,12 +74,8 @@ const ShipState& GameState::ship() const {
     return shipState_;
 }
 
-std::span<const FlameParticleRenderData> GameState::flame_particles() const {
-    return flameParticleRenderData_;
-}
-
-const FlameEmitterConfig& GameState::flame_config() const {
-    return flameConfig_;
+std::span<const EffectParticleRenderData> GameState::particles() const {
+    return particleRenderData_;
 }
 
 float GameState::random_range(float minValue, float maxValue) {
@@ -92,7 +92,7 @@ ColorRgb GameState::lerp_color(const ColorRgb& from, const ColorRgb& to, float t
     };
 }
 
-ColorRgb GameState::particle_color_at_life(const FlameParticle& particle, float normalizedAge) const {
+ColorRgb GameState::particle_color_at_life(const EffectParticle& particle, float normalizedAge) const {
     if (normalizedAge < 0.45f) {
         return lerp_color(particle.startColor, particle.midColor, normalizedAge / 0.45f);
     }
@@ -109,7 +109,7 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
     emissionAccumulator_ -= particlesToEmitFloat;
 
     for (std::size_t index = 0; index < particlesToEmit; ++index) {
-        if (flameParticles_.size() >= flameConfig_.maxParticles) {
+        if (particles_.size() >= flameConfig_.maxParticles) {
             break;
         }
 
@@ -140,7 +140,7 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
         const float red = random_range(flameConfig_.endRedRange[0], flameConfig_.endRedRange[1]);
         const float finalGreen = random_range(flameConfig_.endGreenRange[0], flameConfig_.endGreenRange[1]);
 
-        FlameParticle particle{};
+        EffectParticle particle{};
         particle.position = emitterPosition;
         particle.velocity = shipState_.velocity + forward_from_angle(emissionAngle) * particleSpeed;
         particle.startColor = {white, white, white};
@@ -149,37 +149,103 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
         particle.ageSeconds = 0.0f;
         particle.lifetimeSeconds = particleLifetime;
         particle.size = particleSize;
-        flameParticles_.push_back(particle);
+        particle.alpha = 1.0f;
+        particle.rotationRadians = emissionAngle;
+        particle.aspectRatio = 1.0f;
+        particle.glowScale = flameConfig_.glowScale;
+        particle.glowIntensity = flameConfig_.glowIntensity;
+        particle.bloomIntensity = flameConfig_.bloomIntensity;
+        particle.lightIntensity = flameConfig_.lightIntensity;
+        particle.fadeAlphaOverLife = true;
+        particle.scaleDownOverLife = true;
+        particle.shape = ParticleShape::Square;
+        particle.despawnBehavior = ParticleDespawnBehavior::Wrap;
+        particles_.push_back(particle);
     }
 }
 
+void GameState::emit_laser_shot() {
+    if (particles_.size() >= flameConfig_.maxParticles) {
+        return;
+    }
+
+    const Vec2 forward = forward_from_angle(shipState_.headingRadians);
+    const Vec2 left = {-forward.y, forward.x};
+    const Vec2 muzzlePosition =
+        shipState_.position +
+        forward * laserConfig_.localSpawnPoint.x +
+        left * laserConfig_.localSpawnPoint.y;
+
+    EffectParticle particle{};
+    particle.position = muzzlePosition;
+    particle.velocity =
+        forward * laserConfig_.speed +
+        shipState_.velocity * laserConfig_.inheritedVelocityFactor;
+    particle.startColor = laserConfig_.color;
+    particle.midColor = laserConfig_.color;
+    particle.endColor = laserConfig_.color;
+    particle.ageSeconds = 0.0f;
+    particle.lifetimeSeconds = 8.0f;
+    particle.size = laserConfig_.length;
+    particle.alpha = 1.0f;
+    particle.rotationRadians = shipState_.headingRadians;
+    particle.aspectRatio = laserConfig_.width / laserConfig_.length;
+    particle.glowScale = laserConfig_.glowScale;
+    particle.glowIntensity = laserConfig_.glowIntensity;
+    particle.bloomIntensity = laserConfig_.bloomIntensity;
+    particle.lightIntensity = laserConfig_.lightIntensity;
+    particle.fadeAlphaOverLife = false;
+    particle.scaleDownOverLife = false;
+    particle.shape = ParticleShape::Rectangle;
+    particle.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+    particles_.push_back(particle);
+}
+
 void GameState::update_particles(float deltaTimeSeconds) {
-    flameParticleRenderData_.clear();
+    particleRenderData_.clear();
 
     std::size_t writeIndex = 0;
-    for (std::size_t readIndex = 0; readIndex < flameParticles_.size(); ++readIndex) {
-        FlameParticle particle = flameParticles_[readIndex];
+    for (std::size_t readIndex = 0; readIndex < particles_.size(); ++readIndex) {
+        EffectParticle particle = particles_[readIndex];
         particle.ageSeconds += deltaTimeSeconds;
         if (particle.ageSeconds >= particle.lifetimeSeconds) {
             continue;
         }
 
         particle.position += particle.velocity * deltaTimeSeconds;
-        wrap_position(particle.position);
+        if (particle.despawnBehavior == ParticleDespawnBehavior::Wrap) {
+            wrap_position(particle.position);
+        } else if (is_out_of_bounds(particle.position)) {
+            continue;
+        }
 
         const float normalizedAge = std::clamp(particle.ageSeconds / particle.lifetimeSeconds, 0.0f, 1.0f);
-        flameParticleRenderData_.push_back({
+        const float renderAlpha = particle.fadeAlphaOverLife
+            ? particle.alpha * (1.0f - normalizedAge)
+            : particle.alpha;
+        const float renderSize = particle.scaleDownOverLife
+            ? particle.size * (1.0f - 0.35f * normalizedAge)
+            : particle.size;
+
+        particleRenderData_.push_back({
             .position = particle.position,
             .color = particle_color_at_life(particle, normalizedAge),
-            .alpha = 1.0f - normalizedAge,
-            .size = particle.size * (1.0f - 0.35f * normalizedAge),
+            .alpha = renderAlpha,
+            .size = renderSize,
+            .rotationRadians = particle.rotationRadians,
+            .aspectRatio = particle.aspectRatio,
+            .shape = particle.shape,
+            .glowScale = particle.glowScale,
+            .glowIntensity = particle.glowIntensity,
+            .bloomIntensity = particle.bloomIntensity,
+            .lightIntensity = particle.lightIntensity,
         });
 
-        flameParticles_[writeIndex] = particle;
+        particles_[writeIndex] = particle;
         ++writeIndex;
     }
 
-    flameParticles_.resize(writeIndex);
+    particles_.resize(writeIndex);
 }
 
 void GameState::wrap_position(Vec2& position) const {
@@ -194,4 +260,12 @@ void GameState::wrap_position(Vec2& position) const {
     } else if (position.y < -kWorldHalfHeight) {
         position.y = kWorldHalfHeight;
     }
+}
+
+bool GameState::is_out_of_bounds(const Vec2& position) const {
+    return
+        position.x > kWorldHalfWidth ||
+        position.x < -kWorldHalfWidth ||
+        position.y > kWorldHalfHeight ||
+        position.y < -kWorldHalfHeight;
 }

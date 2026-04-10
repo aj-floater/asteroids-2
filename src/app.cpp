@@ -10,9 +10,9 @@ namespace {
 
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 960;
-constexpr float kMaxDeltaTimeSeconds = 1.0f / 20.0f;
-constexpr float kMouseTurnDeadzonePixels = 0.01f;
-constexpr float kPixelsPerTurnIntentUnit = 3.0f;
+constexpr float kMaxDeltaTimeSeconds = 1.0f / 40.0f;
+constexpr float kMouseTurnDeadzonePixels = 0.5f;
+constexpr float kPixelsPerTurnIntentUnit = 1.0f;
 constexpr float kMouseTurnIntentDecayPerSecond = 50.0f;
 
 }
@@ -104,7 +104,7 @@ void App::main_loop() {
 
         const float deltaTimeSeconds = std::min(frameDuration.count(), kMaxDeltaTimeSeconds);
         gameState_.update(deltaTimeSeconds, poll_input(deltaTimeSeconds));
-        renderer_.render(gameState_.ship(), gameState_.flame_particles());
+        renderer_.render(gameState_.ship(), gameState_.particles());
     }
 }
 
@@ -145,6 +145,12 @@ InputState App::poll_input(float deltaTimeSeconds) {
         glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
         glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS;
 
+    const bool fireHeld =
+        glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
+        glfwGetKey(window_, GLFW_KEY_SPACE) == GLFW_PRESS;
+    inputState.firePressed = fireHeld && !previousFireHeld_;
+    previousFireHeld_ = fireHeld;
+
     const float decayFactor = std::max(0.0f, 1.0f - kMouseTurnIntentDecayPerSecond * deltaTimeSeconds);
     mouseTurnIntent_ *= decayFactor;
     if (std::abs(mouseTurnIntent_) < 0.01f) {
@@ -165,9 +171,11 @@ void App::set_mouse_capture(bool focused) {
         hasPreviousMousePosition_ = true;
         pendingMouseDeltaX_ = 0.0f;
         mouseTurnIntent_ = 0.0f;
+        previousFireHeld_ = false;
     } else {
         hasPreviousMousePosition_ = false;
         pendingMouseDeltaX_ = 0.0f;
         mouseTurnIntent_ = 0.0f;
+        previousFireHeld_ = false;
     }
 }

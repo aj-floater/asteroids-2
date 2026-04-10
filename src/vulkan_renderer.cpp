@@ -81,8 +81,8 @@ VkVertexInputBindingDescription VulkanRenderer::ParticleVertex::binding_descript
     return description;
 }
 
-std::array<VkVertexInputAttributeDescription, 3> VulkanRenderer::ParticleVertex::attribute_descriptions() {
-    std::array<VkVertexInputAttributeDescription, 3> descriptions{};
+std::array<VkVertexInputAttributeDescription, 4> VulkanRenderer::ParticleVertex::attribute_descriptions() {
+    std::array<VkVertexInputAttributeDescription, 4> descriptions{};
 
     descriptions[0].binding = 0;
     descriptions[0].location = 0;
@@ -96,8 +96,13 @@ std::array<VkVertexInputAttributeDescription, 3> VulkanRenderer::ParticleVertex:
 
     descriptions[2].binding = 0;
     descriptions[2].location = 2;
-    descriptions[2].format = VK_FORMAT_R32_SFLOAT;
-    descriptions[2].offset = offsetof(ParticleVertex, size);
+    descriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[2].offset = offsetof(ParticleVertex, params0);
+
+    descriptions[3].binding = 0;
+    descriptions[3].location = 3;
+    descriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[3].offset = offsetof(ParticleVertex, params1);
 
     return descriptions;
 }
@@ -125,8 +130,8 @@ void VulkanRenderer::initialize(GLFWwindow* window) {
     update_descriptor_sets();
 }
 
-void VulkanRenderer::render(const ShipState& shipState, std::span<const FlameParticleRenderData> flameParticles) {
-    update_particle_buffer(flameParticles);
+void VulkanRenderer::render(const ShipState& shipState, std::span<const EffectParticleRenderData> particles) {
+    update_particle_buffer(particles);
 
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
 
@@ -156,7 +161,7 @@ void VulkanRenderer::render(const ShipState& shipState, std::span<const FlamePar
 
     vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
     vkResetCommandBuffer(commandBuffers_[currentFrame_], 0);
-    record_command_buffer(commandBuffers_[currentFrame_], imageIndex, shipState, flameParticles);
+    record_command_buffer(commandBuffers_[currentFrame_], imageIndex, shipState, particles);
 
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -1340,18 +1345,29 @@ void VulkanRenderer::recreate_swapchain() {
     update_descriptor_sets();
 }
 
-void VulkanRenderer::update_particle_buffer(std::span<const FlameParticleRenderData> flameParticles) {
-    if (flameParticles.size() > maxParticleCount_) {
-        throw std::runtime_error("Flame particle count exceeds renderer buffer capacity.");
+void VulkanRenderer::update_particle_buffer(std::span<const EffectParticleRenderData> particles) {
+    if (particles.size() > maxParticleCount_) {
+        throw std::runtime_error("Particle count exceeds renderer buffer capacity.");
     }
 
     std::vector<ParticleVertex> upload;
-    upload.reserve(flameParticles.size());
-    for (const FlameParticleRenderData& particle : flameParticles) {
+    upload.reserve(particles.size());
+    for (const EffectParticleRenderData& particle : particles) {
         upload.push_back({
             .position = {particle.position.x, particle.position.y},
             .color = {particle.color.r, particle.color.g, particle.color.b, particle.alpha},
-            .size = particle.size,
+            .params0 = {
+                particle.size,
+                particle.rotationRadians,
+                particle.aspectRatio,
+                static_cast<float>(particle.shape == ParticleShape::Rectangle ? 1.0f : 0.0f),
+            },
+            .params1 = {
+                particle.glowScale,
+                particle.glowIntensity,
+                particle.bloomIntensity,
+                particle.lightIntensity,
+            },
         });
     }
 
@@ -1441,7 +1457,7 @@ void VulkanRenderer::record_command_buffer(
     VkCommandBuffer commandBuffer,
     uint32_t imageIndex,
     const ShipState& shipState,
-    std::span<const FlameParticleRenderData> flameParticles
+    std::span<const EffectParticleRenderData> particles
 ) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1477,12 +1493,12 @@ void VulkanRenderer::record_command_buffer(
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        if (!flameParticles.empty()) {
+        if (!particles.empty()) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleLightPipeline_);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(flameParticles.size()), 0, 0);
+            vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(particles.size()), 0, 0);
         }
         vkCmdEndRenderPass(commandBuffer);
         transition_image_to_shader_read(commandBuffer, lightTarget_.image);
@@ -1505,12 +1521,12 @@ void VulkanRenderer::record_command_buffer(
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        if (!flameParticles.empty()) {
+        if (!particles.empty()) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleScenePipeline_);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(flameParticles.size()), 0, 0);
+            vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(particles.size()), 0, 0);
         }
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shipPipeline_);
