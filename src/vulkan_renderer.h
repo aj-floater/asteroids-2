@@ -14,7 +14,12 @@
 class VulkanRenderer {
 public:
     void initialize(GLFWwindow* window);
-    void render(const ShipState& shipState, std::span<const EffectParticleRenderData> particles);
+    void render(
+        const ShipState& shipState,
+        std::span<const EffectParticleRenderData> particles,
+        std::span<const AsteroidRenderData> asteroids,
+        float deltaTimeSeconds
+    );
     void handle_resize();
     void shutdown();
 
@@ -43,6 +48,10 @@ private:
         float texelOffset[2];
     };
 
+    struct StarPushConstants {
+        float elapsedTimeSeconds = 0.0f;
+    };
+
     struct ParticleVertex {
         float position[2];
         float color[4];
@@ -51,6 +60,22 @@ private:
 
         static VkVertexInputBindingDescription binding_description();
         static std::array<VkVertexInputAttributeDescription, 4> attribute_descriptions();
+    };
+
+    struct AsteroidVertex {
+        float position[2];
+
+        static VkVertexInputBindingDescription binding_description();
+        static std::array<VkVertexInputAttributeDescription, 1> attribute_descriptions();
+    };
+
+    struct StarVertex {
+        float position[2];
+        float color[4];
+        float params[4] = {1.0f, 1.0f, 1.0f, 0.0f};
+
+        static VkVertexInputBindingDescription binding_description();
+        static std::array<VkVertexInputAttributeDescription, 3> attribute_descriptions();
     };
 
     struct OffscreenTarget {
@@ -75,7 +100,10 @@ private:
     void create_descriptor_pool();
     void create_descriptor_sets();
     void create_command_pool();
+    void create_starfield();
+    void create_star_buffer();
     void create_particle_buffer();
+    void create_asteroid_buffer();
     void create_command_buffers();
     void create_sync_objects();
 
@@ -84,6 +112,7 @@ private:
 
     void update_descriptor_sets();
     void update_particle_buffer(std::span<const EffectParticleRenderData> particles);
+    void update_asteroid_buffer(std::span<const AsteroidRenderData> asteroids);
     void create_offscreen_target(OffscreenTarget& target);
     void destroy_offscreen_target(OffscreenTarget& target);
     void create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory);
@@ -93,7 +122,8 @@ private:
         VkCommandBuffer commandBuffer,
         uint32_t imageIndex,
         const ShipState& shipState,
-        std::span<const EffectParticleRenderData> particles
+        std::span<const EffectParticleRenderData> particles,
+        std::span<const AsteroidRenderData> asteroids
     );
 
     QueueFamilyIndices find_queue_families(VkPhysicalDevice device) const;
@@ -143,6 +173,10 @@ private:
 
     VkPipelineLayout shipPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline shipPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout starPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline starPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout asteroidPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline asteroidPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout particleScenePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline particleScenePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout particleLightPipelineLayout_ = VK_NULL_HANDLE;
@@ -155,10 +189,24 @@ private:
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
 
+    VkBuffer starBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory starBufferMemory_ = VK_NULL_HANDLE;
+    void* starBufferMapped_ = nullptr;
+    std::size_t starCount_ = 0;
+    std::size_t maxStarCount_ = 240;
+
     VkBuffer particleBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory particleBufferMemory_ = VK_NULL_HANDLE;
     void* particleBufferMapped_ = nullptr;
     std::size_t maxParticleCount_ = 1024;
+
+    VkBuffer asteroidBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory asteroidBufferMemory_ = VK_NULL_HANDLE;
+    void* asteroidBufferMapped_ = nullptr;
+    std::size_t asteroidVertexCount_ = 0;
+    std::size_t maxAsteroidVertexCount_ = 1024;
+
+    float elapsedTimeSeconds_ = 0.0f;
 
     std::vector<VkSemaphore> imageAvailableSemaphores_;
     std::vector<VkSemaphore> renderFinishedSemaphores_;

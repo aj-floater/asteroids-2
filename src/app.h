@@ -15,7 +15,7 @@ private:
     void initialize();
     void main_loop();
     void shutdown();
-    InputState poll_input(float deltaTimeSeconds);
+    InputState poll_input();
     void set_mouse_capture(bool focused);
 
     GLFWwindow* window_ = nullptr;
@@ -24,7 +24,6 @@ private:
     bool mouseCaptured_ = false;
     double previousMouseX_ = 0.0;
     float pendingMouseDeltaX_ = 0.0f;
-    float mouseTurnIntent_ = 0.0f;
     bool hasPreviousMousePosition_ = false;
     bool previousFireHeld_ = false;
 };

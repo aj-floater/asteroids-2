@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <numbers>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,8 @@ namespace {
 const std::vector<const char*> kRequiredDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
+
+constexpr std::uint32_t kStarRandomSeed = 0x51A2C4D7u;
 
 VkPipelineColorBlendAttachmentState opaque_blend_attachment() {
     VkPipelineColorBlendAttachmentState attachment{};
@@ -67,6 +70,11 @@ VkPipelineColorBlendAttachmentState additive_blend_attachment() {
     return attachment;
 }
 
+float next_random(std::uint32_t& state) {
+    state = 1664525u * state + 1013904223u;
+    return static_cast<float>(state & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+}
+
 }
 
 bool VulkanRenderer::QueueFamilyIndices::is_complete() const {
@@ -107,6 +115,52 @@ std::array<VkVertexInputAttributeDescription, 4> VulkanRenderer::ParticleVertex:
     return descriptions;
 }
 
+VkVertexInputBindingDescription VulkanRenderer::AsteroidVertex::binding_description() {
+    VkVertexInputBindingDescription description{};
+    description.binding = 0;
+    description.stride = sizeof(AsteroidVertex);
+    description.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    return description;
+}
+
+std::array<VkVertexInputAttributeDescription, 1> VulkanRenderer::AsteroidVertex::attribute_descriptions() {
+    std::array<VkVertexInputAttributeDescription, 1> descriptions{};
+    descriptions[0].binding = 0;
+    descriptions[0].location = 0;
+    descriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+    descriptions[0].offset = offsetof(AsteroidVertex, position);
+    return descriptions;
+}
+
+VkVertexInputBindingDescription VulkanRenderer::StarVertex::binding_description() {
+    VkVertexInputBindingDescription description{};
+    description.binding = 0;
+    description.stride = sizeof(StarVertex);
+    description.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+    return description;
+}
+
+std::array<VkVertexInputAttributeDescription, 3> VulkanRenderer::StarVertex::attribute_descriptions() {
+    std::array<VkVertexInputAttributeDescription, 3> descriptions{};
+
+    descriptions[0].binding = 0;
+    descriptions[0].location = 0;
+    descriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+    descriptions[0].offset = offsetof(StarVertex, position);
+
+    descriptions[1].binding = 0;
+    descriptions[1].location = 1;
+    descriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[1].offset = offsetof(StarVertex, color);
+
+    descriptions[2].binding = 0;
+    descriptions[2].location = 2;
+    descriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[2].offset = offsetof(StarVertex, params);
+
+    return descriptions;
+}
+
 void VulkanRenderer::initialize(GLFWwindow* window) {
     window_ = window;
     create_instance();
@@ -124,14 +178,24 @@ void VulkanRenderer::initialize(GLFWwindow* window) {
     create_descriptor_pool();
     create_descriptor_sets();
     create_command_pool();
+    create_star_buffer();
+    create_starfield();
     create_particle_buffer();
+    create_asteroid_buffer();
     create_command_buffers();
     create_sync_objects();
     update_descriptor_sets();
 }
 
-void VulkanRenderer::render(const ShipState& shipState, std::span<const EffectParticleRenderData> particles) {
+void VulkanRenderer::render(
+    const ShipState& shipState,
+    std::span<const EffectParticleRenderData> particles,
+    std::span<const AsteroidRenderData> asteroids,
+    float deltaTimeSeconds
+) {
+    elapsedTimeSeconds_ += deltaTimeSeconds;
     update_particle_buffer(particles);
+    update_asteroid_buffer(asteroids);
 
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
 
@@ -161,7 +225,7 @@ void VulkanRenderer::render(const ShipState& shipState, std::span<const EffectPa
 
     vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
     vkResetCommandBuffer(commandBuffers_[currentFrame_], 0);
-    record_command_buffer(commandBuffers_[currentFrame_], imageIndex, shipState, particles);
+    record_command_buffer(commandBuffers_[currentFrame_], imageIndex, shipState, particles, asteroids);
 
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -212,6 +276,21 @@ void VulkanRenderer::shutdown() {
 
     cleanup_swapchain();
 
+    if (starBufferMapped_ != nullptr) {
+        vkUnmapMemory(device_, starBufferMemory_);
+        starBufferMapped_ = nullptr;
+    }
+
+    if (starBuffer_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, starBuffer_, nullptr);
+        starBuffer_ = VK_NULL_HANDLE;
+    }
+
+    if (starBufferMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, starBufferMemory_, nullptr);
+        starBufferMemory_ = VK_NULL_HANDLE;
+    }
+
     if (particleBufferMapped_ != nullptr) {
         vkUnmapMemory(device_, particleBufferMemory_);
         particleBufferMapped_ = nullptr;
@@ -225,6 +304,21 @@ void VulkanRenderer::shutdown() {
     if (particleBufferMemory_ != VK_NULL_HANDLE) {
         vkFreeMemory(device_, particleBufferMemory_, nullptr);
         particleBufferMemory_ = VK_NULL_HANDLE;
+    }
+
+    if (asteroidBufferMapped_ != nullptr) {
+        vkUnmapMemory(device_, asteroidBufferMemory_);
+        asteroidBufferMapped_ = nullptr;
+    }
+
+    if (asteroidBuffer_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, asteroidBuffer_, nullptr);
+        asteroidBuffer_ = VK_NULL_HANDLE;
+    }
+
+    if (asteroidBufferMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, asteroidBufferMemory_, nullptr);
+        asteroidBufferMemory_ = VK_NULL_HANDLE;
     }
 
     if (descriptorPool_ != VK_NULL_HANDLE) {
@@ -683,6 +777,10 @@ void VulkanRenderer::create_offscreen_targets() {
 }
 
 void VulkanRenderer::create_pipelines() {
+    const std::vector<char> starVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/star.vert.spv");
+    const std::vector<char> starFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/star.frag.spv");
+    const std::vector<char> asteroidVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/asteroid.vert.spv");
+    const std::vector<char> asteroidFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/asteroid.frag.spv");
     const std::vector<char> shipVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/ship.vert.spv");
     const std::vector<char> shipFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/ship.frag.spv");
     const std::vector<char> particleVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/particle.vert.spv");
@@ -693,6 +791,10 @@ void VulkanRenderer::create_pipelines() {
     const std::vector<char> blurFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/blur.frag.spv");
     const std::vector<char> compositeFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/composite.frag.spv");
 
+    const VkShaderModule starVertModule = create_shader_module(starVertShaderCode);
+    const VkShaderModule starFragModule = create_shader_module(starFragShaderCode);
+    const VkShaderModule asteroidVertModule = create_shader_module(asteroidVertShaderCode);
+    const VkShaderModule asteroidFragModule = create_shader_module(asteroidFragShaderCode);
     const VkShaderModule shipVertModule = create_shader_module(shipVertShaderCode);
     const VkShaderModule shipFragModule = create_shader_module(shipFragShaderCode);
     const VkShaderModule particleVertModule = create_shader_module(particleVertShaderCode);
@@ -730,6 +832,128 @@ void VulkanRenderer::create_pipelines() {
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    {
+        const VkVertexInputBindingDescription bindingDescription = StarVertex::binding_description();
+        const auto attributeDescriptions = StarVertex::attribute_descriptions();
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, starVertModule, "main", nullptr},
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, starFragModule, "main", nullptr},
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+        const std::array<VkPipelineColorBlendAttachmentState, 2> attachments = {
+            alpha_blend_attachment(),
+            opaque_blend_attachment(),
+        };
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = static_cast<uint32_t>(attachments.size());
+        colorBlending.pAttachments = attachments.data();
+
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.size = sizeof(StarPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+
+        if (vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &starPipelineLayout_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create star pipeline layout.");
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = starPipelineLayout_;
+        pipelineInfo.renderPass = sceneRenderPass_;
+
+        if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &starPipeline_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create star graphics pipeline.");
+        }
+    }
+
+    {
+        const VkVertexInputBindingDescription bindingDescription = AsteroidVertex::binding_description();
+        const auto attributeDescriptions = AsteroidVertex::attribute_descriptions();
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, asteroidVertModule, "main", nullptr},
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, asteroidFragModule, "main", nullptr},
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        const std::array<VkPipelineColorBlendAttachmentState, 2> attachments = {
+            opaque_blend_attachment(),
+            opaque_blend_attachment(),
+        };
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = static_cast<uint32_t>(attachments.size());
+        colorBlending.pAttachments = attachments.data();
+
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pushConstantRange.size = sizeof(ShipPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+
+        if (vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &asteroidPipelineLayout_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create asteroid pipeline layout.");
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = asteroidPipelineLayout_;
+        pipelineInfo.renderPass = sceneRenderPass_;
+
+        if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &asteroidPipeline_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create asteroid graphics pipeline.");
+        }
+    }
 
     {
         VkPipelineShaderStageCreateInfo shaderStages[] = {
@@ -994,6 +1218,10 @@ void VulkanRenderer::create_pipelines() {
         }
     }
 
+    vkDestroyShaderModule(device_, starFragModule, nullptr);
+    vkDestroyShaderModule(device_, starVertModule, nullptr);
+    vkDestroyShaderModule(device_, asteroidFragModule, nullptr);
+    vkDestroyShaderModule(device_, asteroidVertModule, nullptr);
     vkDestroyShaderModule(device_, compositeFragModule, nullptr);
     vkDestroyShaderModule(device_, blurFragModule, nullptr);
     vkDestroyShaderModule(device_, fullscreenVertModule, nullptr);
@@ -1187,6 +1415,64 @@ void VulkanRenderer::create_command_pool() {
     }
 }
 
+void VulkanRenderer::create_starfield() {
+    std::vector<StarVertex> upload;
+    upload.reserve(maxStarCount_);
+
+    std::uint32_t rng = kStarRandomSeed;
+    for (std::size_t index = 0; index < maxStarCount_; ++index) {
+        const float x = -GameState::kWorldHalfWidth + next_random(rng) * GameState::kWorldHalfWidth * 2.0f;
+        const float y = -GameState::kWorldHalfHeight + next_random(rng) * GameState::kWorldHalfHeight * 2.0f;
+        const float warmCoolMix = next_random(rng);
+        const float size = 0.12f + next_random(rng) * 0.42f;
+        const float baseBrightness = 0.35f + next_random(rng) * 0.5f;
+        const float twinkleAmplitude = 0.04f + next_random(rng) * 0.14f;
+        const float twinkleSpeed = 0.5f + next_random(rng) * 1.7f;
+        const float twinklePhase = next_random(rng) * 2.0f * std::numbers::pi_v<float>;
+
+        const ColorRgb cool = {0.86f, 0.9f, 1.0f};
+        const ColorRgb neutral = {1.0f, 1.0f, 1.0f};
+        const ColorRgb warm = {1.0f, 0.97f, 0.9f};
+        const ColorRgb tintA = {
+            neutral.r + (cool.r - neutral.r) * std::max(0.0f, (warmCoolMix - 0.5f) * 2.0f),
+            neutral.g + (cool.g - neutral.g) * std::max(0.0f, (warmCoolMix - 0.5f) * 2.0f),
+            neutral.b + (cool.b - neutral.b) * std::max(0.0f, (warmCoolMix - 0.5f) * 2.0f),
+        };
+        const ColorRgb tintB = {
+            neutral.r + (warm.r - neutral.r) * std::max(0.0f, (0.5f - warmCoolMix) * 2.0f),
+            neutral.g + (warm.g - neutral.g) * std::max(0.0f, (0.5f - warmCoolMix) * 2.0f),
+            neutral.b + (warm.b - neutral.b) * std::max(0.0f, (0.5f - warmCoolMix) * 2.0f),
+        };
+        const ColorRgb color = warmCoolMix >= 0.5f ? tintA : tintB;
+
+        upload.push_back({
+            .position = {x, y},
+            .color = {color.r, color.g, color.b, twinklePhase},
+            .params = {size, baseBrightness, twinkleAmplitude, twinkleSpeed},
+        });
+    }
+
+    starCount_ = upload.size();
+    if (!upload.empty()) {
+        std::memcpy(starBufferMapped_, upload.data(), upload.size() * sizeof(StarVertex));
+    }
+}
+
+void VulkanRenderer::create_star_buffer() {
+    const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(maxStarCount_ * sizeof(StarVertex));
+    create_buffer(
+        bufferSize,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        starBuffer_,
+        starBufferMemory_
+    );
+
+    if (vkMapMemory(device_, starBufferMemory_, 0, bufferSize, 0, &starBufferMapped_) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to map star vertex buffer.");
+    }
+}
+
 void VulkanRenderer::create_particle_buffer() {
     const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(maxParticleCount_ * sizeof(ParticleVertex));
     create_buffer(
@@ -1199,6 +1485,21 @@ void VulkanRenderer::create_particle_buffer() {
 
     if (vkMapMemory(device_, particleBufferMemory_, 0, bufferSize, 0, &particleBufferMapped_) != VK_SUCCESS) {
         throw std::runtime_error("Failed to map particle vertex buffer.");
+    }
+}
+
+void VulkanRenderer::create_asteroid_buffer() {
+    const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(maxAsteroidVertexCount_ * sizeof(AsteroidVertex));
+    create_buffer(
+        bufferSize,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        asteroidBuffer_,
+        asteroidBufferMemory_
+    );
+
+    if (vkMapMemory(device_, asteroidBufferMemory_, 0, bufferSize, 0, &asteroidBufferMapped_) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to map asteroid vertex buffer.");
     }
 }
 
@@ -1281,6 +1582,22 @@ void VulkanRenderer::cleanup_swapchain() {
     if (particleScenePipelineLayout_ != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device_, particleScenePipelineLayout_, nullptr);
         particleScenePipelineLayout_ = VK_NULL_HANDLE;
+    }
+    if (starPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, starPipeline_, nullptr);
+        starPipeline_ = VK_NULL_HANDLE;
+    }
+    if (starPipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, starPipelineLayout_, nullptr);
+        starPipelineLayout_ = VK_NULL_HANDLE;
+    }
+    if (asteroidPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, asteroidPipeline_, nullptr);
+        asteroidPipeline_ = VK_NULL_HANDLE;
+    }
+    if (asteroidPipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, asteroidPipelineLayout_, nullptr);
+        asteroidPipelineLayout_ = VK_NULL_HANDLE;
     }
     if (shipPipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, shipPipeline_, nullptr);
@@ -1376,6 +1693,44 @@ void VulkanRenderer::update_particle_buffer(std::span<const EffectParticleRender
     }
 }
 
+void VulkanRenderer::update_asteroid_buffer(std::span<const AsteroidRenderData> asteroids) {
+    std::vector<AsteroidVertex> upload;
+    upload.reserve(asteroids.size() * AsteroidRenderData::kMaxVertexCount * 3);
+
+    for (const AsteroidRenderData& asteroid : asteroids) {
+        if (asteroid.vertexCount < 3) {
+            continue;
+        }
+
+        const float cosine = std::cos(asteroid.rotationRadians);
+        const float sine = std::sin(asteroid.rotationRadians);
+        const auto rotate_and_translate = [&](const Vec2& point) {
+            return Vec2{
+                asteroid.position.x + point.x * cosine - point.y * sine,
+                asteroid.position.y + point.x * sine + point.y * cosine,
+            };
+        };
+
+        const Vec2 center = asteroid.position;
+        for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+            const Vec2 vertexA = rotate_and_translate(asteroid.localVertices[index]);
+            const Vec2 vertexB = rotate_and_translate(asteroid.localVertices[(index + 1) % asteroid.vertexCount]);
+            upload.push_back({.position = {center.x, center.y}});
+            upload.push_back({.position = {vertexA.x, vertexA.y}});
+            upload.push_back({.position = {vertexB.x, vertexB.y}});
+        }
+    }
+
+    if (upload.size() > maxAsteroidVertexCount_) {
+        throw std::runtime_error("Asteroid vertex count exceeds renderer buffer capacity.");
+    }
+
+    asteroidVertexCount_ = upload.size();
+    if (!upload.empty()) {
+        std::memcpy(asteroidBufferMapped_, upload.data(), upload.size() * sizeof(AsteroidVertex));
+    }
+}
+
 void VulkanRenderer::create_buffer(
     VkDeviceSize size,
     VkBufferUsageFlags usage,
@@ -1457,7 +1812,8 @@ void VulkanRenderer::record_command_buffer(
     VkCommandBuffer commandBuffer,
     uint32_t imageIndex,
     const ShipState& shipState,
-    std::span<const EffectParticleRenderData> particles
+    std::span<const EffectParticleRenderData> particles,
+    std::span<const AsteroidRenderData> asteroids
 ) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1520,6 +1876,47 @@ void VulkanRenderer::record_command_buffer(
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        if (starCount_ > 0) {
+            VkBuffer vertexBuffers[] = {starBuffer_};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, starPipeline_);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+            StarPushConstants starPushConstants{};
+            starPushConstants.elapsedTimeSeconds = elapsedTimeSeconds_;
+            vkCmdPushConstants(
+                commandBuffer,
+                starPipelineLayout_,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(StarPushConstants),
+                &starPushConstants
+            );
+
+            vkCmdDraw(commandBuffer, 4, static_cast<uint32_t>(starCount_), 0, 0);
+        }
+
+        if (!asteroids.empty() && asteroidVertexCount_ > 0) {
+            VkBuffer vertexBuffers[] = {asteroidBuffer_};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, asteroidPipeline_);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+            ShipPushConstants pushConstants{};
+            pushConstants.worldHalfExtents[0] = GameState::kWorldHalfWidth;
+            pushConstants.worldHalfExtents[1] = GameState::kWorldHalfHeight;
+            vkCmdPushConstants(
+                commandBuffer,
+                asteroidPipelineLayout_,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(ShipPushConstants),
+                &pushConstants
+            );
+
+            vkCmdDraw(commandBuffer, static_cast<uint32_t>(asteroidVertexCount_), 1, 0, 0);
+        }
 
         if (!particles.empty()) {
             VkBuffer vertexBuffers[] = {particleBuffer_};

@@ -11,9 +11,7 @@ namespace {
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 960;
 constexpr float kMaxDeltaTimeSeconds = 1.0f / 40.0f;
-constexpr float kMouseTurnDeadzonePixels = 0.5f;
-constexpr float kPixelsPerTurnIntentUnit = 1.0f;
-constexpr float kMouseTurnIntentDecayPerSecond = 50.0f;
+constexpr float kMouseTurnDeadzonePixels = 0.01f;
 
 }
 
@@ -103,8 +101,8 @@ void App::main_loop() {
         previousTime = currentTime;
 
         const float deltaTimeSeconds = std::min(frameDuration.count(), kMaxDeltaTimeSeconds);
-        gameState_.update(deltaTimeSeconds, poll_input(deltaTimeSeconds));
-        renderer_.render(gameState_.ship(), gameState_.particles());
+        gameState_.update(deltaTimeSeconds, poll_input());
+        renderer_.render(gameState_.ship(), gameState_.particles(), gameState_.asteroids(), deltaTimeSeconds);
     }
 }
 
@@ -119,27 +117,15 @@ void App::shutdown() {
     glfwTerminate();
 }
 
-InputState App::poll_input(float deltaTimeSeconds) {
+InputState App::poll_input() {
     InputState inputState;
-    float keyboardTurnInput = 0.0f;
-    if (glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS) {
-        keyboardTurnInput += 1.0f;
-    }
-    if (glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS) {
-        keyboardTurnInput -= 1.0f;
-    }
+    inputState.rotateLeft = glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS;
+    inputState.rotateRight = glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS;
 
     if (mouseCaptured_ && std::abs(pendingMouseDeltaX_) >= kMouseTurnDeadzonePixels) {
-        mouseTurnIntent_ += std::clamp(
-            -pendingMouseDeltaX_ / kPixelsPerTurnIntentUnit,
-            -1.0f,
-            1.0f
-        );
+        inputState.mouseTurnDelta = pendingMouseDeltaX_;
     }
     pendingMouseDeltaX_ = 0.0f;
-    mouseTurnIntent_ = std::clamp(mouseTurnIntent_, -1.0f, 1.0f);
-
-    inputState.turnInput = std::clamp(mouseTurnIntent_ + keyboardTurnInput, -1.0f, 1.0f);
 
     inputState.thrustForward =
         glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS ||
@@ -150,12 +136,6 @@ InputState App::poll_input(float deltaTimeSeconds) {
         glfwGetKey(window_, GLFW_KEY_SPACE) == GLFW_PRESS;
     inputState.firePressed = fireHeld && !previousFireHeld_;
     previousFireHeld_ = fireHeld;
-
-    const float decayFactor = std::max(0.0f, 1.0f - kMouseTurnIntentDecayPerSecond * deltaTimeSeconds);
-    mouseTurnIntent_ *= decayFactor;
-    if (std::abs(mouseTurnIntent_) < 0.01f) {
-        mouseTurnIntent_ = 0.0f;
-    }
 
     return inputState;
 }
@@ -170,12 +150,10 @@ void App::set_mouse_capture(bool focused) {
         glfwGetCursorPos(window_, &previousMouseX_, nullptr);
         hasPreviousMousePosition_ = true;
         pendingMouseDeltaX_ = 0.0f;
-        mouseTurnIntent_ = 0.0f;
         previousFireHeld_ = false;
     } else {
         hasPreviousMousePosition_ = false;
         pendingMouseDeltaX_ = 0.0f;
-        mouseTurnIntent_ = 0.0f;
         previousFireHeld_ = false;
     }
 }

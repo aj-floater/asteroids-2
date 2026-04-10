@@ -9,6 +9,7 @@ namespace {
 constexpr float kAngularDampingPerSecond = 4.2f;
 constexpr float kAngularAccelerationRadiansPerSecondSquared = 18.0f;
 constexpr float kMaxAngularSpeedRadiansPerSecond = 4.4f;
+constexpr float kMouseTurnAccelerationPerPixel = -0.09f;
 constexpr float kThrustAcceleration = 75.0f;
 constexpr float kMaxSpeed = 90.0f;
 constexpr float kTau = 6.28318530717958647692f;
@@ -20,21 +21,34 @@ GameState::GameState() {
     shipState_.velocity = {0.0f, 0.0f};
     shipState_.headingRadians = std::numbers::pi_v<float> * 0.5f;
     shipState_.angularVelocityRadiansPerSecond = 0.0f;
-    rngState_ = flameConfig_.randomSeed;
+    rngState_ = asteroidConfig_.randomSeed;
+    asteroids_.reserve(asteroidConfig_.asteroidCount);
+    asteroidRenderData_.reserve(asteroidConfig_.asteroidCount);
     particles_.reserve(flameConfig_.maxParticles);
     particleRenderData_.reserve(flameConfig_.maxParticles);
+    initialize_asteroids();
 }
 
 void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
+    float turnInput = 0.0f;
+    if (inputState.rotateLeft) {
+        turnInput += 1.0f;
+    }
+    if (inputState.rotateRight) {
+        turnInput -= 1.0f;
+    }
+
     shipState_.angularVelocityRadiansPerSecond +=
-        inputState.turnInput * kAngularAccelerationRadiansPerSecondSquared * deltaTimeSeconds;
+        turnInput * kAngularAccelerationRadiansPerSecondSquared * deltaTimeSeconds;
+    shipState_.angularVelocityRadiansPerSecond +=
+        inputState.mouseTurnDelta * kMouseTurnAccelerationPerPixel;
     shipState_.angularVelocityRadiansPerSecond = std::clamp(
         shipState_.angularVelocityRadiansPerSecond,
         -kMaxAngularSpeedRadiansPerSecond,
         kMaxAngularSpeedRadiansPerSecond
     );
 
-    if (std::abs(inputState.turnInput) < 0.001f) {
+    if (turnInput == 0.0f && std::abs(inputState.mouseTurnDelta) < 0.001f) {
         const float dampingFactor = std::max(0.0f, 1.0f - kAngularDampingPerSecond * deltaTimeSeconds);
         shipState_.angularVelocityRadiansPerSecond *= dampingFactor;
         if (std::abs(shipState_.angularVelocityRadiansPerSecond) < 0.02f) {
@@ -67,6 +81,7 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
 
     shipState_.position += shipState_.velocity * deltaTimeSeconds;
     wrap_position(shipState_.position);
+    update_asteroids(deltaTimeSeconds);
     update_particles(deltaTimeSeconds);
 }
 
@@ -78,10 +93,19 @@ std::span<const EffectParticleRenderData> GameState::particles() const {
     return particleRenderData_;
 }
 
+std::span<const AsteroidRenderData> GameState::asteroids() const {
+    return asteroidRenderData_;
+}
+
 float GameState::random_range(float minValue, float maxValue) {
     rngState_ = 1664525u * rngState_ + 1013904223u;
     const float unit = static_cast<float>(rngState_ & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
     return minValue + (maxValue - minValue) * unit;
+}
+
+std::size_t GameState::random_index(std::size_t minValue, std::size_t maxValue) {
+    const float value = random_range(static_cast<float>(minValue), static_cast<float>(maxValue + 1));
+    return static_cast<std::size_t>(std::min(value, static_cast<float>(maxValue)));
 }
 
 ColorRgb GameState::lerp_color(const ColorRgb& from, const ColorRgb& to, float t) const {
@@ -98,6 +122,137 @@ ColorRgb GameState::particle_color_at_life(const EffectParticle& particle, float
     }
 
     return lerp_color(particle.midColor, particle.endColor, (normalizedAge - 0.45f) / 0.55f);
+}
+
+void GameState::initialize_asteroids() {
+    asteroids_.clear();
+    asteroidRenderData_.clear();
+
+    for (std::size_t index = 0; index < asteroidConfig_.asteroidCount; ++index) {
+        asteroids_.push_back(spawn_asteroid());
+    }
+
+    asteroidRenderData_.reserve(asteroids_.size());
+    for (const AsteroidState& asteroid : asteroids_) {
+        asteroidRenderData_.push_back({
+            .localVertices = asteroid.localVertices,
+            .vertexCount = asteroid.vertexCount,
+            .position = asteroid.position,
+            .rotationRadians = asteroid.rotationRadians,
+        });
+    }
+}
+
+AsteroidState GameState::spawn_asteroid() {
+    AsteroidState asteroid{};
+    asteroid.vertexCount = random_index(asteroidConfig_.minVertexCount, asteroidConfig_.maxVertexCount);
+    const float baseSize = random_range(asteroidConfig_.minSize, asteroidConfig_.maxSize);
+    const float angleStep = kTau / static_cast<float>(asteroid.vertexCount);
+
+    float maxRadius = 0.0f;
+    for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+        const float angle = angleStep * static_cast<float>(index);
+        const float radiusScale = random_range(1.0f - asteroidConfig_.radialJitter, 1.0f + asteroidConfig_.radialJitter);
+        const float radius = baseSize * radiusScale;
+        asteroid.localVertices[index] = forward_from_angle(angle) * radius;
+        maxRadius = std::max(maxRadius, radius);
+    }
+    asteroid.outerRadius = maxRadius;
+
+    const std::size_t edgeIndex = random_index(0, 3);
+    float inwardHeading = 0.0f;
+    switch (edgeIndex) {
+    case 0: {
+        asteroid.position.x = -kWorldHalfWidth + maxRadius;
+        asteroid.position.y = random_range(-kWorldHalfHeight + maxRadius, kWorldHalfHeight - maxRadius);
+        inwardHeading = 0.0f;
+        break;
+    }
+    case 1: {
+        asteroid.position.x = kWorldHalfWidth - maxRadius;
+        asteroid.position.y = random_range(-kWorldHalfHeight + maxRadius, kWorldHalfHeight - maxRadius);
+        inwardHeading = std::numbers::pi_v<float>;
+        break;
+    }
+    case 2: {
+        asteroid.position.x = random_range(-kWorldHalfWidth + maxRadius, kWorldHalfWidth - maxRadius);
+        asteroid.position.y = -kWorldHalfHeight + maxRadius;
+        inwardHeading = std::numbers::pi_v<float> * 0.5f;
+        break;
+    }
+    default: {
+        asteroid.position.x = random_range(-kWorldHalfWidth + maxRadius, kWorldHalfWidth - maxRadius);
+        asteroid.position.y = kWorldHalfHeight - maxRadius;
+        inwardHeading = std::numbers::pi_v<float> * 1.5f;
+        break;
+    }
+    }
+
+    const float travelHeading = inwardHeading + random_range(
+        -asteroidConfig_.inwardHeadingSpreadRadians,
+        asteroidConfig_.inwardHeadingSpreadRadians
+    );
+    asteroid.velocity = forward_from_angle(travelHeading) *
+        random_range(asteroidConfig_.minSpeed, asteroidConfig_.maxSpeed);
+    asteroid.rotationRadians = random_range(0.0f, kTau);
+    asteroid.angularVelocityRadiansPerSecond = random_range(
+        asteroidConfig_.minAngularSpeedRadiansPerSecond,
+        asteroidConfig_.maxAngularSpeedRadiansPerSecond
+    );
+    return asteroid;
+}
+
+GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& asteroid) const {
+    AsteroidBounds bounds{};
+    if (asteroid.vertexCount == 0) {
+        return bounds;
+    }
+
+    const float cosine = std::cos(asteroid.rotationRadians);
+    const float sine = std::sin(asteroid.rotationRadians);
+    const Vec2 firstVertex = asteroid.localVertices[0];
+    const Vec2 firstWorldVertex = {
+        asteroid.position.x + firstVertex.x * cosine - firstVertex.y * sine,
+        asteroid.position.y + firstVertex.x * sine + firstVertex.y * cosine,
+    };
+
+    bounds.minX = firstWorldVertex.x;
+    bounds.maxX = firstWorldVertex.x;
+    bounds.minY = firstWorldVertex.y;
+    bounds.maxY = firstWorldVertex.y;
+
+    for (std::size_t index = 1; index < asteroid.vertexCount; ++index) {
+        const Vec2 localVertex = asteroid.localVertices[index];
+        const Vec2 worldVertex = {
+            asteroid.position.x + localVertex.x * cosine - localVertex.y * sine,
+            asteroid.position.y + localVertex.x * sine + localVertex.y * cosine,
+        };
+
+        bounds.minX = std::min(bounds.minX, worldVertex.x);
+        bounds.maxX = std::max(bounds.maxX, worldVertex.x);
+        bounds.minY = std::min(bounds.minY, worldVertex.y);
+        bounds.maxY = std::max(bounds.maxY, worldVertex.y);
+    }
+
+    return bounds;
+}
+
+void GameState::wrap_asteroid(AsteroidState& asteroid) const {
+    const AsteroidBounds bounds = asteroid_bounds(asteroid);
+    const float width = bounds.maxX - bounds.minX;
+    const float height = bounds.maxY - bounds.minY;
+
+    if (bounds.minX > kWorldHalfWidth) {
+        asteroid.position.x -= (2.0f * kWorldHalfWidth) + width;
+    } else if (bounds.maxX < -kWorldHalfWidth) {
+        asteroid.position.x += (2.0f * kWorldHalfWidth) + width;
+    }
+
+    if (bounds.minY > kWorldHalfHeight) {
+        asteroid.position.y -= (2.0f * kWorldHalfHeight) + height;
+    } else if (bounds.maxY < -kWorldHalfHeight) {
+        asteroid.position.y += (2.0f * kWorldHalfHeight) + height;
+    }
 }
 
 void GameState::emit_thrust_particles(float deltaTimeSeconds) {
@@ -199,6 +354,31 @@ void GameState::emit_laser_shot() {
     particle.shape = ParticleShape::Rectangle;
     particle.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
     particles_.push_back(particle);
+}
+
+void GameState::update_asteroids(float deltaTimeSeconds) {
+    asteroidRenderData_.clear();
+    asteroidRenderData_.reserve(asteroids_.size());
+
+    for (AsteroidState& asteroid : asteroids_) {
+        asteroid.position += asteroid.velocity * deltaTimeSeconds;
+
+        asteroid.rotationRadians += asteroid.angularVelocityRadiansPerSecond * deltaTimeSeconds;
+        if (asteroid.rotationRadians >= kTau) {
+            asteroid.rotationRadians = std::fmod(asteroid.rotationRadians, kTau);
+        } else if (asteroid.rotationRadians < 0.0f) {
+            asteroid.rotationRadians = std::fmod(asteroid.rotationRadians, kTau) + kTau;
+        }
+
+        wrap_asteroid(asteroid);
+
+        asteroidRenderData_.push_back({
+            .localVertices = asteroid.localVertices,
+            .vertexCount = asteroid.vertexCount,
+            .position = asteroid.position,
+            .rotationRadians = asteroid.rotationRadians,
+        });
+    }
 }
 
 void GameState::update_particles(float deltaTimeSeconds) {

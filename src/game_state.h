@@ -9,7 +9,9 @@
 #include <vector>
 
 struct InputState {
-    float turnInput = 0.0f;
+    bool rotateLeft = false;
+    bool rotateRight = false;
+    float mouseTurnDelta = 0.0f;
     bool thrustForward = false;
     bool firePressed = false;
 };
@@ -25,6 +27,15 @@ struct ShipState {
     Vec2 velocity{};
     float headingRadians = 0.0f;
     float angularVelocityRadiansPerSecond = 0.0f;
+};
+
+struct AsteroidRenderData {
+    static constexpr std::size_t kMaxVertexCount = 12;
+
+    std::array<Vec2, kMaxVertexCount> localVertices{};
+    std::size_t vertexCount = 0;
+    Vec2 position{};
+    float rotationRadians = 0.0f;
 };
 
 enum class ParticleShape : std::uint32_t {
@@ -112,6 +123,31 @@ struct LaserConfig {
     ColorRgb color = {0.0f, 0.68f, 0.31f};
 };
 
+struct AsteroidFieldConfig {
+    std::uint32_t randomSeed = 0xC41D5EEDu;
+    std::size_t asteroidCount = 14;
+    float minSize = 5.0f;
+    float maxSize = 13.0f;
+    float minSpeed = 6.0f;
+    float maxSpeed = 19.0f;
+    float minAngularSpeedRadiansPerSecond = -0.55f;
+    float maxAngularSpeedRadiansPerSecond = 0.55f;
+    std::size_t minVertexCount = 7;
+    std::size_t maxVertexCount = 11;
+    float radialJitter = 0.28f;
+    float inwardHeadingSpreadRadians = 0.85f;
+};
+
+struct AsteroidState {
+    std::array<Vec2, AsteroidRenderData::kMaxVertexCount> localVertices{};
+    std::size_t vertexCount = 0;
+    Vec2 position{};
+    Vec2 velocity{};
+    float rotationRadians = 0.0f;
+    float angularVelocityRadiansPerSecond = 0.0f;
+    float outerRadius = 1.0f;
+};
+
 class GameState {
 public:
     static constexpr float kWorldHalfWidth = 100.0f;
@@ -123,13 +159,27 @@ public:
 
     const ShipState& ship() const;
     std::span<const EffectParticleRenderData> particles() const;
+    std::span<const AsteroidRenderData> asteroids() const;
 
 private:
+    struct AsteroidBounds {
+        float minX = 0.0f;
+        float maxX = 0.0f;
+        float minY = 0.0f;
+        float maxY = 0.0f;
+    };
+
     float random_range(float minValue, float maxValue);
+    std::size_t random_index(std::size_t minValue, std::size_t maxValue);
     ColorRgb lerp_color(const ColorRgb& from, const ColorRgb& to, float t) const;
     ColorRgb particle_color_at_life(const EffectParticle& particle, float normalizedAge) const;
+    void initialize_asteroids();
+    AsteroidState spawn_asteroid();
+    AsteroidBounds asteroid_bounds(const AsteroidState& asteroid) const;
+    void wrap_asteroid(AsteroidState& asteroid) const;
     void emit_thrust_particles(float deltaTimeSeconds);
     void emit_laser_shot();
+    void update_asteroids(float deltaTimeSeconds);
     void update_particles(float deltaTimeSeconds);
     void wrap_position(Vec2& position) const;
     bool is_out_of_bounds(const Vec2& position) const;
@@ -137,6 +187,9 @@ private:
     ShipState shipState_{};
     FlameEmitterConfig flameConfig_{};
     LaserConfig laserConfig_{};
+    AsteroidFieldConfig asteroidConfig_{};
+    std::vector<AsteroidState> asteroids_{};
+    std::vector<AsteroidRenderData> asteroidRenderData_{};
     std::vector<EffectParticle> particles_{};
     std::vector<EffectParticleRenderData> particleRenderData_{};
     float emissionAccumulator_ = 0.0f;

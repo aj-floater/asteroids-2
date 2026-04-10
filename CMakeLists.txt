@@ -32,6 +32,42 @@ else()
 endif()
 
 add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/star.vert.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_VERT_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/star.vert"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/star.vert.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/star.vert"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/star.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/star.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/star.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/star.frag"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/asteroid.vert.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_VERT_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/asteroid.vert"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/asteroid.vert.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/asteroid.vert"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/asteroid.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/asteroid.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/asteroid.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/asteroid.frag"
+  VERBATIM
+)
+
+add_custom_command(
   OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.vert.spv"
   COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_VERT_ARGS} -V
           "${CMAKE_CURRENT_SOURCE_DIR}/shaders/ship.vert"
@@ -115,6 +151,10 @@ add_custom_command(
 add_custom_target(asteroids_shaders ALL
   DEPENDS
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.vert.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/star.vert.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/star.frag.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/asteroid.vert.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/asteroid.frag.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.frag.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle.vert.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/particle.frag.spv"
