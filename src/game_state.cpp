@@ -12,7 +12,150 @@ constexpr float kMaxAngularSpeedRadiansPerSecond = 4.4f;
 constexpr float kMouseTurnAccelerationPerPixel = -0.09f;
 constexpr float kThrustAcceleration = 75.0f;
 constexpr float kMaxSpeed = 90.0f;
+constexpr float kCollisionEpsilon = 0.0001f;
+constexpr float kShipCollisionScale = 0.8f;
 constexpr float kTau = 6.28318530717958647692f;
+
+struct Triangle {
+    std::array<Vec2, 3> points{};
+};
+
+struct Bounds {
+    float minX = 0.0f;
+    float maxX = 0.0f;
+    float minY = 0.0f;
+    float maxY = 0.0f;
+};
+
+constexpr std::array<std::array<Vec2, 3>, 2> kShipLocalTriangles{{
+    {{{4.0f, 0.0f}, {-4.0f, 4.0f}, {-2.0f, 0.0f}}},
+    {{{4.0f, 0.0f}, {-2.0f, 0.0f}, {-4.0f, -4.0f}}},
+}};
+
+Vec2 rotate_point(const Vec2& point, float radians) {
+    const float cosine = std::cos(radians);
+    const float sine = std::sin(radians);
+    return {
+        point.x * cosine - point.y * sine,
+        point.x * sine + point.y * cosine,
+    };
+}
+
+std::array<Triangle, 2> ship_world_triangles(const ShipState& shipState) {
+    std::array<Triangle, 2> worldTriangles{};
+    for (std::size_t triangleIndex = 0; triangleIndex < worldTriangles.size(); ++triangleIndex) {
+        for (std::size_t pointIndex = 0; pointIndex < worldTriangles[triangleIndex].points.size(); ++pointIndex) {
+            worldTriangles[triangleIndex].points[pointIndex] =
+                shipState.position + rotate_point(
+                    kShipLocalTriangles[triangleIndex][pointIndex] * kShipCollisionScale,
+                    shipState.headingRadians
+                );
+        }
+    }
+
+    return worldTriangles;
+}
+
+Bounds bounds_from_triangles(const std::array<Triangle, 2>& triangles) {
+    Bounds bounds{};
+    const Vec2 firstPoint = triangles[0].points[0];
+    bounds.minX = firstPoint.x;
+    bounds.maxX = firstPoint.x;
+    bounds.minY = firstPoint.y;
+    bounds.maxY = firstPoint.y;
+
+    for (const Triangle& triangle : triangles) {
+        for (const Vec2& point : triangle.points) {
+            bounds.minX = std::min(bounds.minX, point.x);
+            bounds.maxX = std::max(bounds.maxX, point.x);
+            bounds.minY = std::min(bounds.minY, point.y);
+            bounds.maxY = std::max(bounds.maxY, point.y);
+        }
+    }
+
+    return bounds;
+}
+
+float signed_area(const Vec2& a, const Vec2& b, const Vec2& c) {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+bool point_on_segment(const Vec2& point, const Vec2& start, const Vec2& end) {
+    if (std::abs(signed_area(start, end, point)) > kCollisionEpsilon) {
+        return false;
+    }
+
+    return
+        point.x >= std::min(start.x, end.x) - kCollisionEpsilon &&
+        point.x <= std::max(start.x, end.x) + kCollisionEpsilon &&
+        point.y >= std::min(start.y, end.y) - kCollisionEpsilon &&
+        point.y <= std::max(start.y, end.y) + kCollisionEpsilon;
+}
+
+bool segments_overlap(const Vec2& a0, const Vec2& a1, const Vec2& b0, const Vec2& b1) {
+    const float areaA0 = signed_area(a0, a1, b0);
+    const float areaA1 = signed_area(a0, a1, b1);
+    const float areaB0 = signed_area(b0, b1, a0);
+    const float areaB1 = signed_area(b0, b1, a1);
+
+    const bool oppositeA =
+        (areaA0 > kCollisionEpsilon && areaA1 < -kCollisionEpsilon) ||
+        (areaA0 < -kCollisionEpsilon && areaA1 > kCollisionEpsilon);
+    const bool oppositeB =
+        (areaB0 > kCollisionEpsilon && areaB1 < -kCollisionEpsilon) ||
+        (areaB0 < -kCollisionEpsilon && areaB1 > kCollisionEpsilon);
+
+    if (oppositeA && oppositeB) {
+        return true;
+    }
+
+    return
+        (std::abs(areaA0) <= kCollisionEpsilon && point_on_segment(b0, a0, a1)) ||
+        (std::abs(areaA1) <= kCollisionEpsilon && point_on_segment(b1, a0, a1)) ||
+        (std::abs(areaB0) <= kCollisionEpsilon && point_on_segment(a0, b0, b1)) ||
+        (std::abs(areaB1) <= kCollisionEpsilon && point_on_segment(a1, b0, b1));
+}
+
+bool point_in_triangle(const Vec2& point, const Triangle& triangle) {
+    const float edge0 = signed_area(triangle.points[0], triangle.points[1], point);
+    const float edge1 = signed_area(triangle.points[1], triangle.points[2], point);
+    const float edge2 = signed_area(triangle.points[2], triangle.points[0], point);
+
+    const bool hasNegative =
+        edge0 < -kCollisionEpsilon ||
+        edge1 < -kCollisionEpsilon ||
+        edge2 < -kCollisionEpsilon;
+    const bool hasPositive =
+        edge0 > kCollisionEpsilon ||
+        edge1 > kCollisionEpsilon ||
+        edge2 > kCollisionEpsilon;
+
+    return !(hasNegative && hasPositive);
+}
+
+bool triangles_overlap(const Triangle& lhs, const Triangle& rhs) {
+    for (std::size_t lhsIndex = 0; lhsIndex < lhs.points.size(); ++lhsIndex) {
+        const Vec2 lhsStart = lhs.points[lhsIndex];
+        const Vec2 lhsEnd = lhs.points[(lhsIndex + 1) % lhs.points.size()];
+        for (std::size_t rhsIndex = 0; rhsIndex < rhs.points.size(); ++rhsIndex) {
+            const Vec2 rhsStart = rhs.points[rhsIndex];
+            const Vec2 rhsEnd = rhs.points[(rhsIndex + 1) % rhs.points.size()];
+            if (segments_overlap(lhsStart, lhsEnd, rhsStart, rhsEnd)) {
+                return true;
+            }
+        }
+    }
+
+    return point_in_triangle(lhs.points[0], rhs) || point_in_triangle(rhs.points[0], lhs);
+}
+
+bool bounds_overlap(const Bounds& lhs, const Bounds& rhs) {
+    return
+        lhs.minX <= rhs.maxX &&
+        lhs.maxX >= rhs.minX &&
+        lhs.minY <= rhs.maxY &&
+        lhs.maxY >= rhs.minY;
+}
 
 }
 
@@ -83,10 +226,26 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
     wrap_position(shipState_.position);
     update_asteroids(deltaTimeSeconds);
     update_particles(deltaTimeSeconds);
+    update_ship_collision_state();
+    if (shipColliding_) {
+        shipState_.position = {0.0f, 0.0f};
+        shipState_.velocity = {0.0f, 0.0f};
+        shipState_.angularVelocityRadiansPerSecond = 0.0f;
+        shipColliding_ = false;
+        collidingAsteroidIndex_.reset();
+    }
 }
 
 const ShipState& GameState::ship() const {
     return shipState_;
+}
+
+bool GameState::shipColliding() const {
+    return shipColliding_;
+}
+
+std::optional<std::size_t> GameState::collidingAsteroidIndex() const {
+    return collidingAsteroidIndex_;
 }
 
 std::span<const EffectParticleRenderData> GameState::particles() const {
@@ -204,7 +363,7 @@ AsteroidState GameState::spawn_asteroid() {
     return asteroid;
 }
 
-GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& asteroid) const {
+GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& asteroid, Vec2 positionOffset) const {
     AsteroidBounds bounds{};
     if (asteroid.vertexCount == 0) {
         return bounds;
@@ -214,8 +373,8 @@ GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& astero
     const float sine = std::sin(asteroid.rotationRadians);
     const Vec2 firstVertex = asteroid.localVertices[0];
     const Vec2 firstWorldVertex = {
-        asteroid.position.x + firstVertex.x * cosine - firstVertex.y * sine,
-        asteroid.position.y + firstVertex.x * sine + firstVertex.y * cosine,
+        asteroid.position.x + positionOffset.x + firstVertex.x * cosine - firstVertex.y * sine,
+        asteroid.position.y + positionOffset.y + firstVertex.x * sine + firstVertex.y * cosine,
     };
 
     bounds.minX = firstWorldVertex.x;
@@ -226,8 +385,8 @@ GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& astero
     for (std::size_t index = 1; index < asteroid.vertexCount; ++index) {
         const Vec2 localVertex = asteroid.localVertices[index];
         const Vec2 worldVertex = {
-            asteroid.position.x + localVertex.x * cosine - localVertex.y * sine,
-            asteroid.position.y + localVertex.x * sine + localVertex.y * cosine,
+            asteroid.position.x + positionOffset.x + localVertex.x * cosine - localVertex.y * sine,
+            asteroid.position.y + positionOffset.y + localVertex.x * sine + localVertex.y * cosine,
         };
 
         bounds.minX = std::min(bounds.minX, worldVertex.x);
@@ -254,6 +413,60 @@ void GameState::wrap_asteroid(AsteroidState& asteroid) const {
         asteroid.position.y -= (2.0f * kWorldHalfHeight) + height;
     } else if (bounds.maxY < -kWorldHalfHeight) {
         asteroid.position.y += (2.0f * kWorldHalfHeight) + height;
+    }
+}
+
+void GameState::update_ship_collision_state() {
+    shipColliding_ = false;
+    collidingAsteroidIndex_.reset();
+
+    const std::array<Triangle, 2> shipTriangles = ship_world_triangles(shipState_);
+    const Bounds shipBounds = bounds_from_triangles(shipTriangles);
+
+    for (std::size_t asteroidIndex = 0; asteroidIndex < asteroids_.size(); ++asteroidIndex) {
+        const AsteroidState& asteroid = asteroids_[asteroidIndex];
+        if (asteroid.vertexCount < 3) {
+            continue;
+        }
+
+        const float cosine = std::cos(asteroid.rotationRadians);
+        const float sine = std::sin(asteroid.rotationRadians);
+        const AsteroidBounds asteroidBounds = asteroid_bounds(asteroid);
+        const Bounds visibleBounds{
+            .minX = asteroidBounds.minX,
+            .maxX = asteroidBounds.maxX,
+            .minY = asteroidBounds.minY,
+            .maxY = asteroidBounds.maxY,
+        };
+        if (!bounds_overlap(shipBounds, visibleBounds)) {
+            continue;
+        }
+
+        const Vec2 asteroidCenter = asteroid.position;
+        std::array<Vec2, AsteroidRenderData::kMaxVertexCount> asteroidWorldVertices{};
+        for (std::size_t vertexIndex = 0; vertexIndex < asteroid.vertexCount; ++vertexIndex) {
+            const Vec2 localVertex = asteroid.localVertices[vertexIndex];
+            asteroidWorldVertices[vertexIndex] = {
+                asteroidCenter.x + localVertex.x * cosine - localVertex.y * sine,
+                asteroidCenter.y + localVertex.x * sine + localVertex.y * cosine,
+            };
+        }
+
+        for (std::size_t vertexIndex = 0; vertexIndex < asteroid.vertexCount; ++vertexIndex) {
+            const Triangle asteroidTriangle{{
+                asteroidCenter,
+                asteroidWorldVertices[vertexIndex],
+                asteroidWorldVertices[(vertexIndex + 1) % asteroid.vertexCount],
+            }};
+
+            for (const Triangle& shipTriangle : shipTriangles) {
+                if (triangles_overlap(shipTriangle, asteroidTriangle)) {
+                    shipColliding_ = true;
+                    collidingAsteroidIndex_ = asteroidIndex;
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -317,6 +530,10 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
         particle.scaleDownOverLife = true;
         particle.shape = ParticleShape::Square;
         particle.despawnBehavior = ParticleDespawnBehavior::Wrap;
+        particle.renderLayer =
+            random_range(0.0f, 1.0f) < flameConfig_.backgroundParticleChance
+            ? ParticleRenderLayer::BehindAsteroids
+            : ParticleRenderLayer::Front;
         particles_.push_back(particle);
     }
 }
@@ -355,6 +572,7 @@ void GameState::emit_laser_shot() {
     particle.scaleDownOverLife = false;
     particle.shape = ParticleShape::Rectangle;
     particle.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+    particle.renderLayer = ParticleRenderLayer::Front;
     particles_.push_back(particle);
 }
 
@@ -422,6 +640,7 @@ void GameState::update_particles(float deltaTimeSeconds) {
             .glowIntensity = particle.glowIntensity,
             .bloomIntensity = particle.bloomIntensity,
             .lightIntensity = particle.lightIntensity,
+            .renderLayer = particle.renderLayer,
         });
 
         particles_[writeIndex] = particle;

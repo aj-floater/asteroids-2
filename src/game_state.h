@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -49,6 +50,11 @@ enum class ParticleDespawnBehavior : std::uint32_t {
     DestroyOffscreen = 1,
 };
 
+enum class ParticleRenderLayer : std::uint32_t {
+    BehindAsteroids = 0,
+    Front = 1,
+};
+
 struct EffectParticle {
     Vec2 position{};
     Vec2 velocity{};
@@ -69,6 +75,7 @@ struct EffectParticle {
     bool scaleDownOverLife = true;
     ParticleShape shape = ParticleShape::Square;
     ParticleDespawnBehavior despawnBehavior = ParticleDespawnBehavior::Wrap;
+    ParticleRenderLayer renderLayer = ParticleRenderLayer::Front;
 };
 
 struct EffectParticleRenderData {
@@ -83,6 +90,7 @@ struct EffectParticleRenderData {
     float glowIntensity = 1.0f;
     float bloomIntensity = 1.0f;
     float lightIntensity = 1.0f;
+    ParticleRenderLayer renderLayer = ParticleRenderLayer::Front;
 };
 
 struct FlameEmitterConfig {
@@ -100,6 +108,7 @@ struct FlameEmitterConfig {
     float maxLifetimeSeconds = 0.4f;
     float minParticleSize = 0.12f;
     float maxParticleSize = 0.9f;
+    float backgroundParticleChance = 0.38f;
     float glowScale = 3.5f;
     float glowIntensity = 1.0f;
     float bloomIntensity = 1.0f;
@@ -160,6 +169,8 @@ public:
     void update(float deltaTimeSeconds, const InputState& inputState);
 
     const ShipState& ship() const;
+    bool shipColliding() const;
+    std::optional<std::size_t> collidingAsteroidIndex() const;
     std::span<const EffectParticleRenderData> particles() const;
     std::span<const AsteroidRenderData> asteroids() const;
 
@@ -177,8 +188,9 @@ private:
     ColorRgb particle_color_at_life(const EffectParticle& particle, float normalizedAge) const;
     void initialize_asteroids();
     AsteroidState spawn_asteroid();
-    AsteroidBounds asteroid_bounds(const AsteroidState& asteroid) const;
+    AsteroidBounds asteroid_bounds(const AsteroidState& asteroid, Vec2 positionOffset = {}) const;
     void wrap_asteroid(AsteroidState& asteroid) const;
+    void update_ship_collision_state();
     void emit_thrust_particles(float deltaTimeSeconds);
     void emit_laser_shot();
     void update_asteroids(float deltaTimeSeconds);
@@ -196,4 +208,6 @@ private:
     std::vector<EffectParticleRenderData> particleRenderData_{};
     float emissionAccumulator_ = 0.0f;
     std::uint32_t rngState_ = 0;
+    bool shipColliding_ = false;
+    std::optional<std::size_t> collidingAsteroidIndex_{};
 };

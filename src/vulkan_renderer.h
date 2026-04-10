@@ -156,6 +156,7 @@ private:
     VkExtent2D swapchainExtent_{};
 
     OffscreenTarget lightTarget_{};
+    OffscreenTarget asteroidLightTarget_{};
     OffscreenTarget sceneTarget_{};
     OffscreenTarget brightTarget_{};
     std::array<OffscreenTarget, 2> blurTargets_{};
@@ -170,6 +171,7 @@ private:
     VkDescriptorSetLayout compositeDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet shipDescriptorSet_ = VK_NULL_HANDLE;
+    VkDescriptorSet asteroidDescriptorSet_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, 3> blurDescriptorSets_{};
     VkDescriptorSet compositeDescriptorSet_ = VK_NULL_HANDLE;
     VkSampler linearSampler_ = VK_NULL_HANDLE;
@@ -202,6 +204,7 @@ private:
     VkDeviceMemory particleBufferMemory_ = VK_NULL_HANDLE;
     void* particleBufferMapped_ = nullptr;
     std::size_t maxParticleCount_ = 1024;
+    std::size_t backgroundParticleCount_ = 0;
 
     VkBuffer asteroidBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory asteroidBufferMemory_ = VK_NULL_HANDLE;

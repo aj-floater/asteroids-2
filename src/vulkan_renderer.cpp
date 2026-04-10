@@ -785,6 +785,7 @@ void VulkanRenderer::destroy_offscreen_target(OffscreenTarget& target) {
 
 void VulkanRenderer::create_offscreen_targets() {
     create_offscreen_target(lightTarget_);
+    create_offscreen_target(asteroidLightTarget_);
     create_offscreen_target(sceneTarget_);
     create_offscreen_target(brightTarget_);
     create_offscreen_target(blurTargets_[0]);
@@ -944,6 +945,8 @@ void VulkanRenderer::create_pipelines() {
 
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &shipDescriptorSetLayout_;
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -1265,6 +1268,21 @@ void VulkanRenderer::create_framebuffers() {
     }
 
     {
+        VkImageView attachments[] = {asteroidLightTarget_.view};
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = lightRenderPass_;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = attachments;
+        framebufferInfo.width = swapchainExtent_.width;
+        framebufferInfo.height = swapchainExtent_.height;
+        framebufferInfo.layers = 1;
+        if (vkCreateFramebuffer(device_, &framebufferInfo, nullptr, &asteroidLightTarget_.framebuffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create asteroid light framebuffer.");
+        }
+    }
+
+    {
         VkImageView attachments[] = {sceneTarget_.view, brightTarget_.view};
         VkFramebufferCreateInfo framebufferInfo{};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -1316,11 +1334,11 @@ void VulkanRenderer::create_framebuffers() {
 void VulkanRenderer::create_descriptor_pool() {
     std::array<VkDescriptorPoolSize, 1> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = 6;
+    poolSizes[0].descriptorCount = 7;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 5;
+    poolInfo.maxSets = 6;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
 
@@ -1338,6 +1356,17 @@ void VulkanRenderer::create_descriptor_sets() {
         allocInfo.pSetLayouts = &shipDescriptorSetLayout_;
         if (vkAllocateDescriptorSets(device_, &allocInfo, &shipDescriptorSet_) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate ship descriptor set.");
+        }
+    }
+
+    {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool_;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &shipDescriptorSetLayout_;
+        if (vkAllocateDescriptorSets(device_, &allocInfo, &asteroidDescriptorSet_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate asteroid descriptor set.");
         }
     }
 
@@ -1387,6 +1416,16 @@ void VulkanRenderer::update_descriptor_sets() {
     shipWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     shipWrite.pImageInfo = &shipImageInfo;
     vkUpdateDescriptorSets(device_, 1, &shipWrite, 0, nullptr);
+
+    VkDescriptorImageInfo asteroidImageInfo = make_image_info(asteroidLightTarget_.view);
+    VkWriteDescriptorSet asteroidWrite{};
+    asteroidWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    asteroidWrite.dstSet = asteroidDescriptorSet_;
+    asteroidWrite.dstBinding = 0;
+    asteroidWrite.descriptorCount = 1;
+    asteroidWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    asteroidWrite.pImageInfo = &asteroidImageInfo;
+    vkUpdateDescriptorSets(device_, 1, &asteroidWrite, 0, nullptr);
 
     const std::array<VkImageView, 3> blurViews = {brightTarget_.view, blurTargets_[0].view, blurTargets_[1].view};
     for (size_t index = 0; index < blurDescriptorSets_.size(); ++index) {
@@ -1560,6 +1599,7 @@ void VulkanRenderer::cleanup_swapchain() {
     swapchainFramebuffers_.clear();
 
     destroy_offscreen_target(lightTarget_);
+    destroy_offscreen_target(asteroidLightTarget_);
     destroy_offscreen_target(sceneTarget_);
     destroy_offscreen_target(brightTarget_);
     for (OffscreenTarget& target : blurTargets_) {
@@ -1682,10 +1722,8 @@ void VulkanRenderer::update_particle_buffer(std::span<const EffectParticleRender
         throw std::runtime_error("Particle count exceeds renderer buffer capacity.");
     }
 
-    std::vector<ParticleVertex> upload;
-    upload.reserve(particles.size());
-    for (const EffectParticleRenderData& particle : particles) {
-        upload.push_back({
+    auto make_vertex = [](const EffectParticleRenderData& particle) {
+        return ParticleVertex{
             .position = {particle.position.x, particle.position.y},
             .color = {particle.color.r, particle.color.g, particle.color.b, particle.alpha},
             .params0 = {
@@ -1700,7 +1738,24 @@ void VulkanRenderer::update_particle_buffer(std::span<const EffectParticleRender
                 particle.bloomIntensity,
                 particle.lightIntensity,
             },
-        });
+        };
+    };
+
+    std::vector<ParticleVertex> upload;
+    upload.reserve(particles.size());
+    backgroundParticleCount_ = 0;
+
+    for (const EffectParticleRenderData& particle : particles) {
+        if (particle.renderLayer == ParticleRenderLayer::BehindAsteroids) {
+            upload.push_back(make_vertex(particle));
+            ++backgroundParticleCount_;
+        }
+    }
+
+    for (const EffectParticleRenderData& particle : particles) {
+        if (particle.renderLayer == ParticleRenderLayer::Front) {
+            upload.push_back(make_vertex(particle));
+        }
     }
 
     if (!upload.empty()) {
@@ -1908,6 +1963,39 @@ void VulkanRenderer::record_command_buffer(
     }
 
     {
+        VkClearValue clearColor{};
+        clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = lightRenderPass_;
+        renderPassInfo.framebuffer = asteroidLightTarget_.framebuffer;
+        renderPassInfo.renderArea = scissor;
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearColor;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        const std::size_t foregroundParticleCount = particles.size() - backgroundParticleCount_;
+        if (foregroundParticleCount > 0) {
+            VkBuffer vertexBuffers[] = {particleBuffer_};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleLightPipeline_);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdDraw(
+                commandBuffer,
+                6,
+                static_cast<uint32_t>(foregroundParticleCount),
+                0,
+                static_cast<uint32_t>(backgroundParticleCount_)
+            );
+        }
+        vkCmdEndRenderPass(commandBuffer);
+        transition_image_to_shader_read(commandBuffer, asteroidLightTarget_.image);
+    }
+
+    {
         std::array<VkClearValue, 2> clearValues{};
         clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
         clearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -1944,10 +2032,28 @@ void VulkanRenderer::record_command_buffer(
             vkCmdDraw(commandBuffer, 4, static_cast<uint32_t>(starCount_), 0, 0);
         }
 
+        if (!particles.empty() && backgroundParticleCount_ > 0) {
+            VkBuffer vertexBuffers[] = {particleBuffer_};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleScenePipeline_);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(backgroundParticleCount_), 0, 0);
+        }
+
         if (!asteroids.empty() && asteroidVertexCount_ > 0) {
             VkBuffer vertexBuffers[] = {asteroidBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, asteroidPipeline_);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                asteroidPipelineLayout_,
+                0,
+                1,
+                &asteroidDescriptorSet_,
+                0,
+                nullptr
+            );
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
             ShipPushConstants pushConstants{};
@@ -1970,7 +2076,16 @@ void VulkanRenderer::record_command_buffer(
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleScenePipeline_);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdDraw(commandBuffer, 6, static_cast<uint32_t>(particles.size()), 0, 0);
+            const std::size_t foregroundParticleCount = particles.size() - backgroundParticleCount_;
+            if (foregroundParticleCount > 0) {
+                vkCmdDraw(
+                    commandBuffer,
+                    6,
+                    static_cast<uint32_t>(foregroundParticleCount),
+                    0,
+                    static_cast<uint32_t>(backgroundParticleCount_)
+                );
+            }
         }
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shipPipeline_);
