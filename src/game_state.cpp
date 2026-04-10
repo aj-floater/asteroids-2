@@ -9,7 +9,7 @@ namespace {
 constexpr float kAngularDampingPerSecond = 4.2f;
 constexpr float kAngularAccelerationRadiansPerSecondSquared = 18.0f;
 constexpr float kMaxAngularSpeedRadiansPerSecond = 4.4f;
-constexpr float kMouseTurnAccelerationPerPixel = -0.09f;
+constexpr float kMouseTurnRadiansPerPixel = -0.002f;
 constexpr float kThrustAcceleration = 75.0f;
 constexpr float kMaxSpeed = 90.0f;
 constexpr float kCollisionEpsilon = 0.0001f;
@@ -183,15 +183,16 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
 
     shipState_.angularVelocityRadiansPerSecond +=
         turnInput * kAngularAccelerationRadiansPerSecondSquared * deltaTimeSeconds;
-    shipState_.angularVelocityRadiansPerSecond +=
-        inputState.mouseTurnDelta * kMouseTurnAccelerationPerPixel;
     shipState_.angularVelocityRadiansPerSecond = std::clamp(
         shipState_.angularVelocityRadiansPerSecond,
         -kMaxAngularSpeedRadiansPerSecond,
         kMaxAngularSpeedRadiansPerSecond
     );
 
-    if (turnInput == 0.0f && std::abs(inputState.mouseTurnDelta) < 0.001f) {
+    if (std::abs(inputState.mouseTurnDelta) >= 0.001f) {
+        shipState_.headingRadians += inputState.mouseTurnDelta * kMouseTurnRadiansPerPixel;
+        shipState_.angularVelocityRadiansPerSecond = 0.0f;
+    } else if (turnInput == 0.0f) {
         const float dampingFactor = std::max(0.0f, 1.0f - kAngularDampingPerSecond * deltaTimeSeconds);
         shipState_.angularVelocityRadiansPerSecond *= dampingFactor;
         if (std::abs(shipState_.angularVelocityRadiansPerSecond) < 0.02f) {
