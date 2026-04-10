@@ -123,12 +123,27 @@ VkVertexInputBindingDescription VulkanRenderer::AsteroidVertex::binding_descript
     return description;
 }
 
-std::array<VkVertexInputAttributeDescription, 1> VulkanRenderer::AsteroidVertex::attribute_descriptions() {
-    std::array<VkVertexInputAttributeDescription, 1> descriptions{};
+std::array<VkVertexInputAttributeDescription, 4> VulkanRenderer::AsteroidVertex::attribute_descriptions() {
+    std::array<VkVertexInputAttributeDescription, 4> descriptions{};
     descriptions[0].binding = 0;
     descriptions[0].location = 0;
     descriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
     descriptions[0].offset = offsetof(AsteroidVertex, position);
+
+    descriptions[1].binding = 0;
+    descriptions[1].location = 1;
+    descriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+    descriptions[1].offset = offsetof(AsteroidVertex, localPosition);
+
+    descriptions[2].binding = 0;
+    descriptions[2].location = 2;
+    descriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[2].offset = offsetof(AsteroidVertex, variation);
+
+    descriptions[3].binding = 0;
+    descriptions[3].location = 3;
+    descriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[3].offset = offsetof(AsteroidVertex, basis);
     return descriptions;
 }
 
@@ -1712,12 +1727,44 @@ void VulkanRenderer::update_asteroid_buffer(std::span<const AsteroidRenderData> 
         };
 
         const Vec2 center = asteroid.position;
+        const float seed = asteroid.shadingSeed;
+        const float seedPhase = seed * 0.0137f;
+        const float noiseScale = 0.16f + 0.06f * (0.5f + 0.5f * std::sin(seedPhase));
+        const float facetDepth = 0.55f + 0.35f * (0.5f + 0.5f * std::sin(seedPhase * 1.7f + 1.1f));
+        const float tintShift = 0.5f + 0.5f * std::sin(seedPhase * 2.3f + 2.4f);
+        float maxRadius = 0.001f;
         for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+            maxRadius = std::max(maxRadius, length(asteroid.localVertices[index]));
+        }
+        const std::array<float, 4> basis = {
+            cosine,
+            sine,
+            1.0f / maxRadius,
+            0.0f,
+        };
+        for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+            const Vec2 localA = asteroid.localVertices[index];
+            const Vec2 localB = asteroid.localVertices[(index + 1) % asteroid.vertexCount];
             const Vec2 vertexA = rotate_and_translate(asteroid.localVertices[index]);
             const Vec2 vertexB = rotate_and_translate(asteroid.localVertices[(index + 1) % asteroid.vertexCount]);
-            upload.push_back({.position = {center.x, center.y}});
-            upload.push_back({.position = {vertexA.x, vertexA.y}});
-            upload.push_back({.position = {vertexB.x, vertexB.y}});
+            upload.push_back({
+                .position = {center.x, center.y},
+                .localPosition = {0.0f, 0.0f},
+                .variation = {seed, noiseScale, facetDepth, tintShift},
+                .basis = {basis[0], basis[1], basis[2], basis[3]},
+            });
+            upload.push_back({
+                .position = {vertexA.x, vertexA.y},
+                .localPosition = {localA.x, localA.y},
+                .variation = {seed, noiseScale, facetDepth, tintShift},
+                .basis = {basis[0], basis[1], basis[2], basis[3]},
+            });
+            upload.push_back({
+                .position = {vertexB.x, vertexB.y},
+                .localPosition = {localB.x, localB.y},
+                .variation = {seed, noiseScale, facetDepth, tintShift},
+                .basis = {basis[0], basis[1], basis[2], basis[3]},
+            });
         }
     }
 

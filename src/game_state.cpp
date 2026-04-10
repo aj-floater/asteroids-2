@@ -139,6 +139,7 @@ void GameState::initialize_asteroids() {
             .vertexCount = asteroid.vertexCount,
             .position = asteroid.position,
             .rotationRadians = asteroid.rotationRadians,
+            .shadingSeed = asteroid.shadingSeed,
         });
     }
 }
@@ -199,6 +200,7 @@ AsteroidState GameState::spawn_asteroid() {
         asteroidConfig_.minAngularSpeedRadiansPerSecond,
         asteroidConfig_.maxAngularSpeedRadiansPerSecond
     );
+    asteroid.shadingSeed = random_range(0.0f, 1024.0f);
     return asteroid;
 }
 
@@ -377,6 +379,7 @@ void GameState::update_asteroids(float deltaTimeSeconds) {
             .vertexCount = asteroid.vertexCount,
             .position = asteroid.position,
             .rotationRadians = asteroid.rotationRadians,
+            .shadingSeed = asteroid.shadingSeed,
         });
     }
 }

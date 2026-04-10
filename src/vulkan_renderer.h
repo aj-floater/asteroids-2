@@ -64,9 +64,12 @@ private:
 
     struct AsteroidVertex {
         float position[2];
+        float localPosition[2];
+        float variation[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float basis[4] = {1.0f, 0.0f, 1.0f, 0.0f};
 
         static VkVertexInputBindingDescription binding_description();
-        static std::array<VkVertexInputAttributeDescription, 1> attribute_descriptions();
+        static std::array<VkVertexInputAttributeDescription, 4> attribute_descriptions();
     };
 
     struct StarVertex {

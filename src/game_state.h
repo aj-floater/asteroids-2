@@ -36,6 +36,7 @@ struct AsteroidRenderData {
     std::size_t vertexCount = 0;
     Vec2 position{};
     float rotationRadians = 0.0f;
+    float shadingSeed = 0.0f;
 };
 
 enum class ParticleShape : std::uint32_t {
@@ -146,6 +147,7 @@ struct AsteroidState {
     float rotationRadians = 0.0f;
     float angularVelocityRadiansPerSecond = 0.0f;
     float outerRadius = 1.0f;
+    float shadingSeed = 0.0f;
 };
 
 class GameState {
