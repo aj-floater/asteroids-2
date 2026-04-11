@@ -37,6 +37,18 @@ struct GameStateTestAccess {
         return gameState.asteroidBurstEffectConfig_;
     }
 
+    static const AsteroidFieldConfig& asteroid_config(const GameState& gameState) {
+        return gameState.asteroidConfig_;
+    }
+
+    static std::uint32_t& rng_state(GameState& gameState) {
+        return gameState.rngState_;
+    }
+
+    static std::vector<AsteroidState> split_asteroid(GameState& gameState, const AsteroidState& asteroid) {
+        return gameState.split_asteroid(asteroid);
+    }
+
     static std::optional<Vec2> impact_position_for(const GameState& gameState, const LaserState& laser) {
         const auto impactEvent = gameState.find_laser_impact(laser);
         if (!impactEvent.has_value()) {
@@ -107,11 +119,23 @@ std::size_t expected_effect_count_for_size(const GameState& gameState, AsteroidS
 
     switch (sizeClass) {
     case AsteroidSizeClass::Large:
-        return laserImpactConfig.particlesPerHit + burstConfig.largeShardCount + burstConfig.largeSmokeCount;
+        return
+            laserImpactConfig.particlesPerHit +
+            burstConfig.largeShardCount +
+            burstConfig.largeGlowCount +
+            burstConfig.largeSmokeCount;
     case AsteroidSizeClass::Medium:
-        return laserImpactConfig.particlesPerHit + burstConfig.mediumShardCount + burstConfig.mediumSmokeCount;
+        return
+            laserImpactConfig.particlesPerHit +
+            burstConfig.mediumShardCount +
+            burstConfig.mediumGlowCount +
+            burstConfig.mediumSmokeCount;
     case AsteroidSizeClass::Small:
-        return laserImpactConfig.particlesPerHit + burstConfig.smallShardCount + burstConfig.smallSmokeCount;
+        return
+            laserImpactConfig.particlesPerHit +
+            burstConfig.smallShardCount +
+            burstConfig.smallGlowCount +
+            burstConfig.smallSmokeCount;
     }
 
     return 0;
@@ -181,6 +205,52 @@ void test_medium_asteroid_splits_into_two_smalls() {
         GameStateTestAccess::effect_particles(gameState).size() == expected_effect_count_for_size(gameState, AsteroidSizeClass::Medium),
         "medium asteroid hit should emit the configured effect count"
     );
+}
+
+void test_split_children_mutate_shape_and_shading_seed() {
+    GameState gameState;
+    reset_world(gameState);
+
+    AsteroidState asteroid = make_test_asteroid(AsteroidSizeClass::Large, {0.0f, 0.0f}, 6.0f);
+    asteroid.vertexCount = 6;
+    asteroid.localVertices[0] = {6.0f, 0.0f};
+    asteroid.localVertices[1] = {3.0f, 4.8f};
+    asteroid.localVertices[2] = {-2.2f, 5.4f};
+    asteroid.localVertices[3] = {-5.7f, 1.0f};
+    asteroid.localVertices[4] = {-4.1f, -4.6f};
+    asteroid.localVertices[5] = {2.8f, -5.2f};
+    asteroid.outerRadius = 6.0f;
+    asteroid.shadingSeed = 13.0f;
+
+    GameStateTestAccess::rng_state(gameState) = 0x12345678u;
+    const auto children = GameStateTestAccess::split_asteroid(gameState, asteroid);
+
+    expect(children.size() == 2, "large asteroid should still split into two children");
+
+    const float childScale = GameStateTestAccess::asteroid_config(gameState).mediumScale;
+    for (const AsteroidState& child : children) {
+        expect(child.sizeClass == AsteroidSizeClass::Medium, "split child should have medium size class");
+        expect(
+            std::abs(child.shadingSeed - asteroid.shadingSeed) > 0.001f,
+            "split child shading seed should be nudged from the parent"
+        );
+
+        bool foundMutatedVertex = false;
+        float maxVertexRadius = 0.0f;
+        for (std::size_t index = 0; index < child.vertexCount; ++index) {
+            const Vec2 expectedScaledVertex = asteroid.localVertices[index] * childScale;
+            if (length(child.localVertices[index] - expectedScaledVertex) > 0.01f) {
+                foundMutatedVertex = true;
+            }
+            maxVertexRadius = std::max(maxVertexRadius, length(child.localVertices[index]));
+        }
+
+        expect(foundMutatedVertex, "split child should not remain an exact scaled copy");
+        expect(
+            std::abs(child.outerRadius - maxVertexRadius) < 0.001f,
+            "child outer radius should be recomputed from the mutated vertices"
+        );
+    }
 }
 
 void test_small_asteroid_is_destroyed() {
@@ -264,6 +334,7 @@ int main() {
         {"firing_creates_laser_and_render_data", test_firing_creates_laser_and_render_data},
         {"large_asteroid_splits_into_two_mediums", test_large_asteroid_splits_into_two_mediums},
         {"medium_asteroid_splits_into_two_smalls", test_medium_asteroid_splits_into_two_smalls},
+        {"split_children_mutate_shape_and_shading_seed", test_split_children_mutate_shape_and_shading_seed},
         {"small_asteroid_is_destroyed", test_small_asteroid_is_destroyed},
         {"one_laser_only_hits_one_asteroid", test_one_laser_only_hits_one_asteroid},
         {"laser_sweep_prevents_tunneling", test_laser_sweep_prevents_tunneling},

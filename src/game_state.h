@@ -176,6 +176,9 @@ struct AsteroidBurstEffectConfig {
     std::size_t largeSmokeCount = 6;
     std::size_t mediumSmokeCount = 4;
     std::size_t smallSmokeCount = 3;
+    std::size_t largeGlowCount = 3;
+    std::size_t mediumGlowCount = 2;
+    std::size_t smallGlowCount = 2;
     float minShardSpeed = 10.0f;
     float maxShardSpeed = 48.0f;
     float minShardLifetimeSeconds = 0.12f;
@@ -188,12 +191,21 @@ struct AsteroidBurstEffectConfig {
     float maxSmokeLifetimeSeconds = 0.46f;
     float minSmokeSizeFactor = 0.22f;
     float maxSmokeSizeFactor = 0.48f;
+    float minGlowSpeed = 18.0f;
+    float maxGlowSpeed = 40.0f;
+    float minGlowLifetimeSeconds = 0.12f;
+    float maxGlowLifetimeSeconds = 0.28f;
+    float minGlowSizeFactor = 0.18f;
+    float maxGlowSizeFactor = 0.32f;
     ColorRgb shardStartColor = {0.32f, 0.34f, 0.36f};
     ColorRgb shardMidColor = {0.22f, 0.23f, 0.25f};
     ColorRgb shardEndColor = {0.06f, 0.06f, 0.07f};
     ColorRgb smokeStartColor = {0.46f, 0.38f, 0.30f};
     ColorRgb smokeMidColor = {0.22f, 0.18f, 0.16f};
     ColorRgb smokeEndColor = {0.04f, 0.04f, 0.04f};
+    ColorRgb glowStartColor = {1.0f, 0.95f, 0.84f};
+    ColorRgb glowMidColor = {1.0f, 0.58f, 0.18f};
+    ColorRgb glowEndColor = {0.48f, 0.08f, 0.02f};
 };
 
 struct AsteroidFieldConfig {
@@ -215,6 +227,11 @@ struct AsteroidFieldConfig {
     float childAngularSpeedMultiplier = 1.2f;
     float childSeparationAngleRadians = 0.45f;
     float childHeadingJitterRadians = 0.12f;
+    float mediumChildRadialPerturbation = 0.09f;
+    float smallChildRadialPerturbation = 0.14f;
+    float childShapeBiasScale = 0.4f;
+    float minChildShadingSeedJitter = 17.0f;
+    float maxChildShadingSeedJitter = 79.0f;
 };
 
 struct AsteroidState {
@@ -274,8 +291,11 @@ private:
     std::vector<AsteroidState> split_asteroid(const AsteroidState& asteroid);
     std::optional<AsteroidSizeClass> next_size_class(AsteroidSizeClass sizeClass) const;
     float child_scale_for_size_class(AsteroidSizeClass sizeClass) const;
+    float child_radial_perturbation_for_size_class(AsteroidSizeClass sizeClass) const;
+    void apply_child_shape_variation(AsteroidState& asteroid);
     std::size_t shard_count_for_size(AsteroidSizeClass sizeClass) const;
     std::size_t smoke_count_for_size(AsteroidSizeClass sizeClass) const;
+    std::size_t glow_count_for_size(AsteroidSizeClass sizeClass) const;
     AsteroidBounds asteroid_bounds(const AsteroidState& asteroid, Vec2 positionOffset = {}) const;
     void rebuild_asteroid_render_data();
     void rebuild_particle_render_data();

@@ -22,6 +22,8 @@ constexpr float kShardAspectRatioMax = 1.25f;
 constexpr float kSmokeBehindChance = 0.6f;
 constexpr float kShardAlpha = 0.72f;
 constexpr float kSmokeAlpha = 0.58f;
+constexpr float kGlowSpreadRadians = 0.95f;
+constexpr float kGlowAlpha = 0.95f;
 
 struct Triangle {
     std::array<Vec2, 3> points{};
@@ -574,6 +576,62 @@ float GameState::child_scale_for_size_class(AsteroidSizeClass sizeClass) const {
     return 1.0f;
 }
 
+float GameState::child_radial_perturbation_for_size_class(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large:
+        return 0.0f;
+    case AsteroidSizeClass::Medium:
+        return asteroidConfig_.mediumChildRadialPerturbation;
+    case AsteroidSizeClass::Small:
+        return asteroidConfig_.smallChildRadialPerturbation;
+    }
+
+    return 0.0f;
+}
+
+void GameState::apply_child_shape_variation(AsteroidState& asteroid) {
+    const float radialPerturbation = child_radial_perturbation_for_size_class(asteroid.sizeClass);
+    float maxRadius = 0.0f;
+    if (radialPerturbation > 0.0f) {
+        const float sharedBias = random_range(
+            -radialPerturbation * asteroidConfig_.childShapeBiasScale,
+            radialPerturbation * asteroidConfig_.childShapeBiasScale
+        );
+
+        for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+            const float baseRadius = length(asteroid.localVertices[index]);
+            if (baseRadius <= kCollisionEpsilon) {
+                continue;
+            }
+
+            const Vec2 direction = asteroid.localVertices[index] * (1.0f / baseRadius);
+            const float localBias = random_range(-radialPerturbation, radialPerturbation);
+            const float radiusScale = 1.0f + std::clamp(
+                sharedBias + localBias,
+                -radialPerturbation,
+                radialPerturbation
+            );
+
+            asteroid.localVertices[index] = direction * (baseRadius * radiusScale);
+            maxRadius = std::max(maxRadius, length(asteroid.localVertices[index]));
+        }
+
+        asteroid.shadingSeed = std::fmod(
+            asteroid.shadingSeed +
+                random_range(
+                    asteroidConfig_.minChildShadingSeedJitter,
+                    asteroidConfig_.maxChildShadingSeedJitter
+                ),
+            1024.0f
+        );
+    }
+
+    for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+        maxRadius = std::max(maxRadius, length(asteroid.localVertices[index]));
+    }
+    asteroid.outerRadius = maxRadius;
+}
+
 std::size_t GameState::shard_count_for_size(AsteroidSizeClass sizeClass) const {
     switch (sizeClass) {
     case AsteroidSizeClass::Large:
@@ -598,6 +656,19 @@ std::size_t GameState::smoke_count_for_size(AsteroidSizeClass sizeClass) const {
     }
 
     return asteroidBurstEffectConfig_.smallSmokeCount;
+}
+
+std::size_t GameState::glow_count_for_size(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large:
+        return asteroidBurstEffectConfig_.largeGlowCount;
+    case AsteroidSizeClass::Medium:
+        return asteroidBurstEffectConfig_.mediumGlowCount;
+    case AsteroidSizeClass::Small:
+        return asteroidBurstEffectConfig_.smallGlowCount;
+    }
+
+    return asteroidBurstEffectConfig_.smallGlowCount;
 }
 
 std::vector<AsteroidState> GameState::split_asteroid(const AsteroidState& asteroid) {
@@ -626,6 +697,7 @@ std::vector<AsteroidState> GameState::split_asteroid(const AsteroidState& astero
         for (std::size_t index = 0; index < child.vertexCount; ++index) {
             child.localVertices[index] = asteroid.localVertices[index] * childScale;
         }
+        apply_child_shape_variation(child);
 
         const float headingOffset =
             directionSign * asteroidConfig_.childSeparationAngleRadians +
@@ -912,6 +984,42 @@ void GameState::emit_asteroid_destruction_particles(const AsteroidState& asteroi
         shard.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
         shard.renderLayer = ParticleRenderLayer::Front;
         if (!try_emit_effect_particle(shard)) {
+            break;
+        }
+    }
+
+    for (std::size_t index = 0; index < glow_count_for_size(asteroid.sizeClass); ++index) {
+        EffectParticle glow{};
+        const float emissionAngle = baseAngle + random_range(-kGlowSpreadRadians, kGlowSpreadRadians);
+        glow.position = burstOrigin;
+        glow.velocity =
+            asteroid.velocity * 0.3f +
+            forward_from_angle(emissionAngle) *
+            random_range(asteroidBurstEffectConfig_.minGlowSpeed, asteroidBurstEffectConfig_.maxGlowSpeed);
+        glow.startColor = asteroidBurstEffectConfig_.glowStartColor;
+        glow.midColor = asteroidBurstEffectConfig_.glowMidColor;
+        glow.endColor = asteroidBurstEffectConfig_.glowEndColor;
+        glow.ageSeconds = 0.0f;
+        glow.lifetimeSeconds = random_range(
+            asteroidBurstEffectConfig_.minGlowLifetimeSeconds,
+            asteroidBurstEffectConfig_.maxGlowLifetimeSeconds
+        );
+        glow.size =
+            asteroid.outerRadius *
+            random_range(asteroidBurstEffectConfig_.minGlowSizeFactor, asteroidBurstEffectConfig_.maxGlowSizeFactor);
+        glow.alpha = kGlowAlpha;
+        glow.rotationRadians = emissionAngle;
+        glow.aspectRatio = random_range(0.85f, 1.12f);
+        glow.glowScale = 4.3f;
+        glow.glowIntensity = 1.4f;
+        glow.bloomIntensity = 2.8f;
+        glow.lightIntensity = 0.52f;
+        glow.fadeAlphaOverLife = true;
+        glow.scaleDownOverLife = true;
+        glow.shape = ParticleShape::Square;
+        glow.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        glow.renderLayer = ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(glow)) {
             break;
         }
     }
