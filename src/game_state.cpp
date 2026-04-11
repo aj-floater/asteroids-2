@@ -29,6 +29,7 @@ constexpr float kDeathAnimationSeconds = 1.5f;
 constexpr float kWaveTransitionSeconds = 2.0f;
 constexpr float kInvulnerabilitySeconds = 3.0f;
 constexpr float kInvulnerabilityFlashHz = 8.0f;
+constexpr float kScoreFlashDecayRate = 2.1f;
 constexpr float kRespawnSafeRadius = 20.0f;
 constexpr std::uint32_t kInitialLives = 3;
 constexpr std::uint32_t kExtraLifeThreshold = 10000;
@@ -379,6 +380,13 @@ void GameState::process_ship_input(float deltaTimeSeconds, const InputState& inp
 }
 
 void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
+    if (scoreFlashEnergy_ > 0.0f) {
+        scoreFlashEnergy_ *= std::exp(-kScoreFlashDecayRate * deltaTimeSeconds);
+        if (scoreFlashEnergy_ < 0.001f) {
+            scoreFlashEnergy_ = 0.0f;
+        }
+    }
+
     update_effect_particles(deltaTimeSeconds);
     update_asteroids(deltaTimeSeconds);
 
@@ -480,6 +488,8 @@ HudState GameState::hud_state() const {
     hud.score = score_;
     hud.lives = lives_;
     hud.wave = wave_;
+    hud.laserColor = laserConfig_.color;
+    hud.scoreFlashEnergy = scoreFlashEnergy_;
     hud.phase = phase_;
     hud.shipVisible = (phase_ == GamePhase::Playing || phase_ == GamePhase::Invulnerable || phase_ == GamePhase::WaveTransition);
     hud.shipFlashing = (phase_ == GamePhase::Invulnerable);
@@ -504,6 +514,7 @@ void GameState::reset() {
     score_ = 0;
     lives_ = kInitialLives;
     wave_ = 0;
+    scoreFlashEnergy_ = 0.0f;
     phaseTimer_ = 0.0f;
     invulnerabilityTimer_ = 0.0f;
     extraLifeAwarded_ = false;
@@ -522,6 +533,7 @@ std::uint32_t GameState::score_for_asteroid(AsteroidSizeClass sizeClass) const {
 void GameState::award_score(std::uint32_t points) {
     const std::uint32_t previousScore = score_;
     score_ += points;
+    scoreFlashEnergy_ += 1.0f;
     if (!extraLifeAwarded_ && previousScore < kExtraLifeThreshold && score_ >= kExtraLifeThreshold) {
         lives_++;
         extraLifeAwarded_ = true;
@@ -1445,6 +1457,10 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
 }
 
 void GameState::emit_laser_shot() {
+    if (lasers_.size() >= laserConfig_.maxActiveShots) {
+        return;
+    }
+
     if (effectParticles_.size() + lasers_.size() >= flameConfig_.maxParticles) {
         return;
     }

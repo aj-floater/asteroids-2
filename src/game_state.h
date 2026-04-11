@@ -27,19 +27,21 @@ enum class GamePhase : std::uint32_t {
     WaveTransition = 5,
 };
 
-struct HudState {
-    std::uint32_t score = 0;
-    std::uint32_t lives = 0;
-    std::uint32_t wave = 0;
-    GamePhase phase = GamePhase::Playing;
-    bool shipVisible = true;
-    bool shipFlashing = false;
-};
-
 struct ColorRgb {
     float r = 1.0f;
     float g = 1.0f;
     float b = 1.0f;
+};
+
+struct HudState {
+    std::uint32_t score = 0;
+    std::uint32_t lives = 0;
+    std::uint32_t wave = 0;
+    ColorRgb laserColor{};
+    float scoreFlashEnergy = 0.0f;
+    GamePhase phase = GamePhase::Playing;
+    bool shipVisible = true;
+    bool shipFlashing = false;
 };
 
 struct ShipState {
@@ -156,9 +158,10 @@ struct FlameEmitterConfig {
 
 struct LaserConfig {
     Vec2 localSpawnPoint = {4.0f, 0.0f};
+    std::size_t maxActiveShots = 4;
     float speed = 170.0f;
     float inheritedVelocityFactor = 0.35f;
-    float lifetimeSeconds = 8.0f;
+    float lifetimeSeconds = 0.8f;
     float length = 0.56f;
     float width = 0.24f;
     float glowScale = 8.0f;
@@ -359,6 +362,7 @@ private:
     std::uint32_t score_ = 0;
     std::uint32_t lives_ = 3;
     std::uint32_t wave_ = 0;
+    float scoreFlashEnergy_ = 0.0f;
     float phaseTimer_ = 0.0f;
     float invulnerabilityTimer_ = 0.0f;
     bool extraLifeAwarded_ = false;

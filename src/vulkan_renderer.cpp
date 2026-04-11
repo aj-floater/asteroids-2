@@ -186,8 +186,8 @@ VkVertexInputBindingDescription VulkanRenderer::HudVertex::binding_description()
     return description;
 }
 
-std::array<VkVertexInputAttributeDescription, 2> VulkanRenderer::HudVertex::attribute_descriptions() {
-    std::array<VkVertexInputAttributeDescription, 2> descriptions{};
+std::array<VkVertexInputAttributeDescription, 3> VulkanRenderer::HudVertex::attribute_descriptions() {
+    std::array<VkVertexInputAttributeDescription, 3> descriptions{};
 
     descriptions[0].binding = 0;
     descriptions[0].location = 0;
@@ -198,6 +198,11 @@ std::array<VkVertexInputAttributeDescription, 2> VulkanRenderer::HudVertex::attr
     descriptions[1].location = 1;
     descriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
     descriptions[1].offset = offsetof(HudVertex, color);
+
+    descriptions[2].binding = 0;
+    descriptions[2].location = 2;
+    descriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    descriptions[2].offset = offsetof(HudVertex, params);
 
     return descriptions;
 }
@@ -1304,11 +1309,14 @@ void VulkanRenderer::create_pipelines() {
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
         inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-        const VkPipelineColorBlendAttachmentState attachment = alpha_blend_attachment();
+        const std::array<VkPipelineColorBlendAttachmentState, 2> attachments = {
+            alpha_blend_attachment(),
+            additive_blend_attachment(),
+        };
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &attachment;
+        colorBlending.attachmentCount = static_cast<uint32_t>(attachments.size());
+        colorBlending.pAttachments = attachments.data();
 
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1329,7 +1337,7 @@ void VulkanRenderer::create_pipelines() {
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
         pipelineInfo.layout = hudPipelineLayout_;
-        pipelineInfo.renderPass = compositeRenderPass_;
+        pipelineInfo.renderPass = sceneRenderPass_;
 
         if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &hudPipeline_) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create HUD graphics pipeline.");
@@ -1675,61 +1683,85 @@ void VulkanRenderer::create_hud_buffer() {
 }
 
 void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
-    // 7-segment display layout for a single digit (in local coordinates):
-    //   Segment 0: top horizontal
-    //   Segment 1: upper-left vertical
-    //   Segment 2: upper-right vertical
-    //   Segment 3: middle horizontal
-    //   Segment 4: lower-left vertical
-    //   Segment 5: lower-right vertical
-    //   Segment 6: bottom horizontal
-
-    // segments[digit][segmentIndex] = true if on
     constexpr bool segs[10][7] = {
-        // seg: 0     1     2     3     4     5     6
-        //      top   UL    UR    mid   LL    LR    bot
-        {true,  true,  true,  false, true,  true,  true},  // 0
-        {false, false, true,  false, false, true,  false}, // 1
-        {true,  false, true,  true,  true,  false, true},  // 2
-        {true,  false, true,  true,  false, true,  true},  // 3
-        {false, true,  true,  true,  false, true,  false}, // 4
-        {true,  true,  false, true,  false, true,  true},  // 5
-        {true,  true,  false, true,  true,  true,  true},  // 6
-        {true,  false, true,  false, false, true,  false}, // 7
-        {true,  true,  true,  true,  true,  true,  true},  // 8
-        {true,  true,  true,  true,  false, true,  true},  // 9
+        {true,  true,  true,  false, true,  true,  true},
+        {false, false, true,  false, false, true,  false},
+        {true,  false, true,  true,  true,  false, true},
+        {true,  false, true,  true,  false, true,  true},
+        {false, true,  true,  true,  false, true,  false},
+        {true,  true,  false, true,  false, true,  true},
+        {true,  true,  false, true,  true,  true,  true},
+        {true,  false, true,  false, false, true,  false},
+        {true,  true,  true,  true,  true,  true,  true},
+        {true,  true,  true,  true,  false, true,  true},
     };
 
-    // Segment geometry in local space (digit is ~1.0 wide, ~1.8 tall)
-    // Each segment is a thin rectangle defined by two corner points
     struct SegmentRect {
-        float x0, y0, x1, y1; // min corner, max corner
+        float x0, y0, x1, y1;
     };
 
-    constexpr float sw = 0.15f; // segment width (thickness)
-    constexpr float dw = 1.0f;  // digit width
-    constexpr float dh = 1.8f;  // digit height
-    constexpr float hh = dh * 0.5f; // half height
+    constexpr float sw = 0.15f;
+    constexpr float dw = 1.0f;
+    constexpr float dh = 1.8f;
+    constexpr float hh = dh * 0.5f;
+    constexpr float kHudEdgePaddingX = 0.08f;
+    constexpr float kHudEdgePaddingY = 0.08f;
+    constexpr std::array<Vec2, 6> kShipSilhouettePoints = {{
+        {4.0f, 0.0f},
+        {-4.0f, 4.0f},
+        {-2.0f, 0.0f},
+        {4.0f, 0.0f},
+        {-2.0f, 0.0f},
+        {-4.0f, -4.0f},
+    }};
 
     constexpr SegmentRect segmentRects[7] = {
-        {sw,       dh - sw,    dw - sw,   dh},         // 0: top horizontal
-        {0.0f,     hh,         sw,        dh - sw},    // 1: upper-left vertical
-        {dw - sw,  hh,         dw,        dh - sw},    // 2: upper-right vertical
-        {sw,       hh - sw * 0.5f, dw - sw, hh + sw * 0.5f}, // 3: middle horizontal
-        {0.0f,     sw,         sw,        hh},          // 4: lower-left vertical
-        {dw - sw,  sw,         dw,        hh},          // 5: lower-right vertical
-        {sw,       0.0f,       dw - sw,   sw},          // 6: bottom horizontal
+        {sw, dh - sw, dw - sw, dh},
+        {0.0f, hh, sw, dh - sw},
+        {dw - sw, hh, dw, dh - sw},
+        {sw, hh - sw * 0.5f, dw - sw, hh + sw * 0.5f},
+        {0.0f, sw, sw, hh},
+        {dw - sw, sw, dw, hh},
+        {sw, 0.0f, dw - sw, sw},
     };
 
     std::vector<HudVertex> vertices;
-    vertices.reserve(512);
+    vertices.reserve(kMaxHudVertices);
 
-    // Helper to add a filled rectangle as two triangles
-    auto add_rect = [&](float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
-        HudVertex v0 = {{x0, y0}, {r, g, b, a}};
-        HudVertex v1 = {{x1, y0}, {r, g, b, a}};
-        HudVertex v2 = {{x1, y1}, {r, g, b, a}};
-        HudVertex v3 = {{x0, y1}, {r, g, b, a}};
+    auto mix_color = [](const ColorRgb& from, const ColorRgb& to, float t) {
+        return ColorRgb{
+            from.r + (to.r - from.r) * t,
+            from.g + (to.g - from.g) * t,
+            from.b + (to.b - from.b) * t,
+        };
+    };
+
+    auto make_vertex = [&](const Vec2& position, const ColorRgb& color, float alpha, float emissiveStrength) {
+        HudVertex vertex{};
+        vertex.position[0] = position.x;
+        vertex.position[1] = position.y;
+        vertex.color[0] = color.r;
+        vertex.color[1] = color.g;
+        vertex.color[2] = color.b;
+        vertex.color[3] = alpha;
+        vertex.params[0] = emissiveStrength;
+        return vertex;
+    };
+
+    auto add_triangle = [&](const Vec2& a, const Vec2& b, const Vec2& c, const ColorRgb& color, float alpha, float emissiveStrength) {
+        HudVertex v0 = make_vertex(a, color, alpha, emissiveStrength);
+        HudVertex v1 = make_vertex(b, color, alpha, emissiveStrength);
+        HudVertex v2 = make_vertex(c, color, alpha, emissiveStrength);
+        vertices.push_back(v0);
+        vertices.push_back(v1);
+        vertices.push_back(v2);
+    };
+
+    auto add_rect = [&](float x0, float y0, float x1, float y1, const ColorRgb& color, float alpha, float emissiveStrength) {
+        const HudVertex v0 = make_vertex({x0, y0}, color, alpha, emissiveStrength);
+        const HudVertex v1 = make_vertex({x1, y0}, color, alpha, emissiveStrength);
+        const HudVertex v2 = make_vertex({x1, y1}, color, alpha, emissiveStrength);
+        const HudVertex v3 = make_vertex({x0, y1}, color, alpha, emissiveStrength);
         vertices.push_back(v0);
         vertices.push_back(v1);
         vertices.push_back(v2);
@@ -1738,9 +1770,29 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         vertices.push_back(v3);
     };
 
-    // Helper to add a digit at a given clip-space position
-    auto add_digit = [&](std::uint32_t digit, float originX, float originY, float scale, float r, float g, float b, float a) {
-        if (digit > 9) digit = 0;
+    auto add_ship = [&](float centerX, float centerY, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+        for (std::size_t vertexIndex = 0; vertexIndex < kShipSilhouettePoints.size(); vertexIndex += 3) {
+            const Vec2 a = {
+                centerX + kShipSilhouettePoints[vertexIndex + 0].x * scale,
+                centerY + kShipSilhouettePoints[vertexIndex + 0].y * scale,
+            };
+            const Vec2 b = {
+                centerX + kShipSilhouettePoints[vertexIndex + 1].x * scale,
+                centerY + kShipSilhouettePoints[vertexIndex + 1].y * scale,
+            };
+            const Vec2 c = {
+                centerX + kShipSilhouettePoints[vertexIndex + 2].x * scale,
+                centerY + kShipSilhouettePoints[vertexIndex + 2].y * scale,
+            };
+            add_triangle(a, b, c, color, alpha, emissiveStrength);
+        }
+    };
+
+    auto add_digit = [&](std::uint32_t digit, float originX, float originY, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+        if (digit > 9) {
+            digit = 0;
+        }
+
         for (int s = 0; s < 7; ++s) {
             if (segs[digit][s]) {
                 const SegmentRect& rect = segmentRects[s];
@@ -1749,18 +1801,18 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
                     originY + rect.y0 * scale,
                     originX + rect.x1 * scale,
                     originY + rect.y1 * scale,
-                    r, g, b, a
+                    color,
+                    alpha,
+                    emissiveStrength
                 );
             }
         }
     };
 
-    // Helper to add a number (right-aligned from a position)
-    auto add_number = [&](std::uint32_t number, float rightX, float topY, float scale, float r, float g, float b, float a) {
-        const float digitWidth = 1.0f * scale;
+    auto add_number = [&](std::uint32_t number, float rightX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+        const float digitWidth = dw * scale;
         const float spacing = 0.3f * scale;
 
-        // Convert to digits
         std::array<std::uint32_t, 10> digits{};
         int digitCount = 0;
         if (number == 0) {
@@ -1774,142 +1826,123 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
             }
         }
 
-        // Draw right to left
         float x = rightX - digitWidth;
-        const float bottomY = topY - 1.8f * scale;
+        const float bottomY = topY - dh * scale;
         for (int i = 0; i < digitCount; ++i) {
-            add_digit(digits[i], x, bottomY, scale, r, g, b, a);
+            add_digit(digits[i], x, bottomY, scale, color, alpha, emissiveStrength);
             x -= digitWidth + spacing;
         }
     };
 
-    // -- Score (top-left) --
-    // After Y negation in shader, positive Y = top of screen
     {
-        const float scale = 0.025f;
-        const float topY = 0.92f;
-        const float rightX = -0.68f;
-        add_number(hudState.score, rightX, topY, scale, 0.85f, 0.85f, 0.9f, 0.9f);
+        const float flashEnergy = std::max(hudState.scoreFlashEnergy, 0.0f);
+        const float flashMix = 1.0f - std::exp(-flashEnergy);
+        const float scoreScale = 0.026f;
+        const float topY = 1.0f - kHudEdgePaddingY;
+        const float rightX = 1.0f - kHudEdgePaddingX;
+        const ColorRgb scoreBaseColor{0.86f, 0.88f, 0.96f};
+        const ColorRgb scoreCoreColor = mix_color(scoreBaseColor, hudState.laserColor, flashMix);
+        const float scoreEmission = 2.6f + flashEnergy * 3.4f;
+        add_number(
+            hudState.score,
+            rightX,
+            topY,
+            scoreScale,
+            scoreCoreColor,
+            0.98f,
+            scoreEmission
+        );
     }
 
-    // -- Lives (small ship silhouettes, below score) --
     {
         const std::uint32_t displayLives = (hudState.lives > 0) ? hudState.lives - 1 : 0;
-        const float shipScale = 0.012f;
-        const float startX = -0.95f;
-        const float shipY = 0.78f;
-        const float shipSpacing = 0.055f;
+        const float shipScale = 0.0048f;
+        const float startX = -1.0f + kHudEdgePaddingX + 4.0f * shipScale;
+        const float shipY = 1.0f - kHudEdgePaddingY - 4.0f * shipScale;
+        const float shipSpacing = 0.040f;
+        const ColorRgb shipColor{0.541f, 0.082f, 0.220f};
+        const float livesEmission = 0.9f;
 
-        // Ship shape: triangle pointing right: (4,0), (-4,4), (-4,-4) simplified to a triangle
         for (std::uint32_t i = 0; i < displayLives && i < 10; ++i) {
-            const float cx = startX + static_cast<float>(i) * shipSpacing;
-            // Front triangle
-            const float tipX = cx + 4.0f * shipScale;
-            const float backX = cx - 4.0f * shipScale;
-            const float notchX = cx - 2.0f * shipScale;
-            const float topW = 4.0f * shipScale;
-            const float botW = -4.0f * shipScale;
-
-            HudVertex v0 = {{tipX, shipY}, {0.85f, 0.85f, 0.9f, 0.8f}};
-            HudVertex v1 = {{backX, shipY + topW}, {0.85f, 0.85f, 0.9f, 0.8f}};
-            HudVertex v2 = {{notchX, shipY}, {0.85f, 0.85f, 0.9f, 0.8f}};
-            HudVertex v3 = {{tipX, shipY}, {0.85f, 0.85f, 0.9f, 0.8f}};
-            HudVertex v4 = {{notchX, shipY}, {0.85f, 0.85f, 0.9f, 0.8f}};
-            HudVertex v5 = {{backX, shipY + botW}, {0.85f, 0.85f, 0.9f, 0.8f}};
-            vertices.push_back(v0);
-            vertices.push_back(v1);
-            vertices.push_back(v2);
-            vertices.push_back(v3);
-            vertices.push_back(v4);
-            vertices.push_back(v5);
+            const float centerX = startX + static_cast<float>(i) * shipSpacing;
+            add_ship(centerX, shipY, shipScale, shipColor, 0.96f, livesEmission);
         }
     }
 
-    // -- GAME OVER text (center, during GameOver phase) --
     if (hudState.phase == GamePhase::GameOver) {
-        // Define simple vector letter shapes using line-segment quads
-        // Each letter is defined as a series of rectangles in a ~1.0 x 1.8 local space
-        const float scale = 0.04f;
+        const float scale = 0.048f;
         const float letterSpacing = 1.3f * scale;
         const float spaceWidth = 0.8f * scale;
-        const float r = 0.9f, g = 0.15f, b = 0.15f, a = 1.0f;
-        const float lw = 0.18f; // line width relative to letter size
-
-        // "GAME OVER" = 9 chars (with space)
-        // Total width estimate: 8 letters * 1.3 + 1 space * 0.8 = 11.2 * scale
+        const float lw = 0.18f;
+        const ColorRgb gameOverColor{0.95f, 0.18f, 0.16f};
+        const float gameOverEmission = 2.1f;
         const float totalWidth = 8.0f * letterSpacing + spaceWidth;
         float cx = -totalWidth * 0.5f;
-        const float cy = -0.04f; // vertically centered (bottom of letters)
+        const float cy = -0.04f;
 
-        // Helper for letter segments
         auto letter_rect = [&](float lx0, float ly0, float lx1, float ly1) {
             add_rect(
-                cx + lx0 * scale, cy + ly0 * scale,
-                cx + lx1 * scale, cy + ly1 * scale,
-                r, g, b, a
+                cx + lx0 * scale,
+                cy + ly0 * scale,
+                cx + lx1 * scale,
+                cy + ly1 * scale,
+                gameOverColor,
+                0.98f,
+                gameOverEmission
             );
         };
 
-        // G
-        letter_rect(lw, 1.8f - lw, 1.0f, 1.8f);         // top
-        letter_rect(0.0f, lw, lw, 1.8f);                   // left
-        letter_rect(lw, 0.0f, 1.0f, lw);                   // bottom
-        letter_rect(1.0f - lw, 0.0f, 1.0f, 0.9f + lw * 0.5f); // right-lower
-        letter_rect(0.5f, 0.9f - lw * 0.5f, 1.0f, 0.9f + lw * 0.5f); // middle-right
+        letter_rect(lw, 1.8f - lw, 1.0f, 1.8f);
+        letter_rect(0.0f, lw, lw, 1.8f);
+        letter_rect(lw, 0.0f, 1.0f, lw);
+        letter_rect(1.0f - lw, 0.0f, 1.0f, 0.9f + lw * 0.5f);
+        letter_rect(0.5f, 0.9f - lw * 0.5f, 1.0f, 0.9f + lw * 0.5f);
         cx += letterSpacing;
 
-        // A
-        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);     // top
-        letter_rect(0.0f, 0.0f, lw, 1.8f);                 // left
-        letter_rect(1.0f - lw, 0.0f, 1.0f, 1.8f);         // right
-        letter_rect(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f); // middle
+        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+        letter_rect(0.0f, 0.0f, lw, 1.8f);
+        letter_rect(1.0f - lw, 0.0f, 1.0f, 1.8f);
+        letter_rect(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
         cx += letterSpacing;
 
-        // M
-        letter_rect(0.0f, 0.0f, lw, 1.8f);                 // left
-        letter_rect(1.0f - lw, 0.0f, 1.0f, 1.8f);         // right
-        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);      // top
-        letter_rect(0.5f - lw * 0.5f, 0.9f, 0.5f + lw * 0.5f, 1.8f - lw); // center stroke
+        letter_rect(0.0f, 0.0f, lw, 1.8f);
+        letter_rect(1.0f - lw, 0.0f, 1.0f, 1.8f);
+        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+        letter_rect(0.5f - lw * 0.5f, 0.9f, 0.5f + lw * 0.5f, 1.8f - lw);
         cx += letterSpacing;
 
-        // E
-        letter_rect(0.0f, 0.0f, lw, 1.8f);                 // left
-        letter_rect(lw, 1.8f - lw, 1.0f, 1.8f);            // top
-        letter_rect(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f); // middle
-        letter_rect(lw, 0.0f, 1.0f, lw);                    // bottom
+        letter_rect(0.0f, 0.0f, lw, 1.8f);
+        letter_rect(lw, 1.8f - lw, 1.0f, 1.8f);
+        letter_rect(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f);
+        letter_rect(lw, 0.0f, 1.0f, lw);
         cx += letterSpacing;
 
-        // (space)
         cx += spaceWidth;
 
-        // O
-        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);     // top
-        letter_rect(0.0f, lw, lw, 1.8f - lw);              // left
-        letter_rect(1.0f - lw, lw, 1.0f, 1.8f - lw);      // right
-        letter_rect(lw, 0.0f, 1.0f - lw, lw);              // bottom
+        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+        letter_rect(0.0f, lw, lw, 1.8f - lw);
+        letter_rect(1.0f - lw, lw, 1.0f, 1.8f - lw);
+        letter_rect(lw, 0.0f, 1.0f - lw, lw);
         cx += letterSpacing;
 
-        // V - approximate as two angled strokes using rects
-        letter_rect(0.0f, 0.9f, lw, 1.8f);                  // upper-left
-        letter_rect(0.0f, 0.0f, lw * 1.5f, 0.9f);           // lower-left
-        letter_rect(1.0f - lw, 0.9f, 1.0f, 1.8f);           // upper-right
-        letter_rect(1.0f - lw * 1.5f, 0.0f, 1.0f, 0.9f);    // lower-right
-        letter_rect(lw * 0.5f, 0.0f, 1.0f - lw * 0.5f, lw); // bottom connector
+        letter_rect(0.0f, 0.9f, lw, 1.8f);
+        letter_rect(0.0f, 0.0f, lw * 1.5f, 0.9f);
+        letter_rect(1.0f - lw, 0.9f, 1.0f, 1.8f);
+        letter_rect(1.0f - lw * 1.5f, 0.0f, 1.0f, 0.9f);
+        letter_rect(lw * 0.5f, 0.0f, 1.0f - lw * 0.5f, lw);
         cx += letterSpacing;
 
-        // E
-        letter_rect(0.0f, 0.0f, lw, 1.8f);                 // left
-        letter_rect(lw, 1.8f - lw, 1.0f, 1.8f);            // top
-        letter_rect(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f); // middle
-        letter_rect(lw, 0.0f, 1.0f, lw);                    // bottom
+        letter_rect(0.0f, 0.0f, lw, 1.8f);
+        letter_rect(lw, 1.8f - lw, 1.0f, 1.8f);
+        letter_rect(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f);
+        letter_rect(lw, 0.0f, 1.0f, lw);
         cx += letterSpacing;
 
-        // R
-        letter_rect(0.0f, 0.0f, lw, 1.8f);                 // left
-        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);      // top
-        letter_rect(1.0f - lw, 0.9f, 1.0f, 1.8f - lw);    // upper-right
-        letter_rect(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f); // middle
-        letter_rect(1.0f - lw, 0.0f, 1.0f, 0.9f - lw * 0.5f); // lower-right
+        letter_rect(0.0f, 0.0f, lw, 1.8f);
+        letter_rect(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+        letter_rect(1.0f - lw, 0.9f, 1.0f, 1.8f - lw);
+        letter_rect(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+        letter_rect(1.0f - lw, 0.0f, 1.0f, 0.9f - lw * 0.5f);
     }
 
     hudVertexCount_ = std::min(vertices.size(), kMaxHudVertices);
@@ -2495,6 +2528,14 @@ void VulkanRenderer::record_command_buffer(
                 vkCmdDraw(commandBuffer, 6, 1, 0, 0);
             }
         }
+
+        if (hudVertexCount_ > 0) {
+            VkBuffer vertexBuffers[] = {hudBuffer_};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, hudPipeline_);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdDraw(commandBuffer, static_cast<uint32_t>(hudVertexCount_), 1, 0, 0);
+        }
         vkCmdEndRenderPass(commandBuffer);
         transition_image_to_shader_read(commandBuffer, sceneTarget_.image);
         transition_image_to_shader_read(commandBuffer, brightTarget_.image);
@@ -2572,14 +2613,6 @@ void VulkanRenderer::record_command_buffer(
             nullptr
         );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-
-        if (hudVertexCount_ > 0) {
-            VkBuffer vertexBuffers[] = {hudBuffer_};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, hudPipeline_);
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdDraw(commandBuffer, static_cast<uint32_t>(hudVertexCount_), 1, 0, 0);
-        }
 
         vkCmdEndRenderPass(commandBuffer);
     }

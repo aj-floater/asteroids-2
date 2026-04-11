@@ -33,6 +33,10 @@ struct GameStateTestAccess {
         return gameState.laserImpactEffectConfig_;
     }
 
+    static const LaserConfig& laser_config(const GameState& gameState) {
+        return gameState.laserConfig_;
+    }
+
     static const AsteroidBurstEffectConfig& asteroid_burst_config(const GameState& gameState) {
         return gameState.asteroidBurstEffectConfig_;
     }
@@ -79,6 +83,10 @@ struct GameStateTestAccess {
         return gameState.wave_;
     }
 
+    static float& score_flash_energy(GameState& gameState) {
+        return gameState.scoreFlashEnergy_;
+    }
+
     static float& phase_timer(GameState& gameState) {
         return gameState.phaseTimer_;
     }
@@ -89,6 +97,10 @@ struct GameStateTestAccess {
 
     static bool& extra_life_awarded(GameState& gameState) {
         return gameState.extraLifeAwarded_;
+    }
+
+    static void award_score(GameState& gameState, std::uint32_t points) {
+        gameState.award_score(points);
     }
 };
 
@@ -131,6 +143,7 @@ void reset_world(GameState& gameState) {
     GameStateTestAccess::score(gameState) = 0;
     GameStateTestAccess::lives(gameState) = 3;
     GameStateTestAccess::wave(gameState) = 1;
+    GameStateTestAccess::score_flash_energy(gameState) = 0.0f;
     GameStateTestAccess::phase_timer(gameState) = 0.0f;
     GameStateTestAccess::invulnerability_timer(gameState) = 0.0f;
     GameStateTestAccess::extra_life_awarded(gameState) = false;
@@ -197,6 +210,41 @@ void test_firing_creates_laser_and_render_data() {
     expect(GameStateTestAccess::lasers(gameState).size() == 1, "expected one active laser");
     expect(gameState.particles().size() == 1, "expected one laser render particle");
     expect(gameState.particles().front().shape == ParticleShape::Rectangle, "laser should render as rectangle");
+}
+
+void test_firing_caps_active_lasers() {
+    GameState gameState;
+    reset_world(gameState);
+
+    InputState inputState;
+    inputState.firePressed = true;
+
+    const std::size_t maxActiveShots = GameStateTestAccess::laser_config(gameState).maxActiveShots;
+    for (std::size_t shotIndex = 0; shotIndex < maxActiveShots + 2; ++shotIndex) {
+        gameState.update(0.01f, inputState);
+    }
+
+    expect(GameStateTestAccess::lasers(gameState).size() == maxActiveShots, "firing should be capped at the configured active shot limit");
+}
+
+void test_firing_resumes_after_active_shots_clear() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::asteroids(gameState).push_back(make_test_asteroid(AsteroidSizeClass::Large, {80.0f, 60.0f}, 6.0f));
+    GameStateTestAccess::rebuild_render_data(gameState);
+
+    InputState inputState;
+    inputState.firePressed = true;
+
+    const LaserConfig& laserConfig = GameStateTestAccess::laser_config(gameState);
+    for (std::size_t shotIndex = 0; shotIndex < laserConfig.maxActiveShots; ++shotIndex) {
+        gameState.update(0.01f, inputState);
+    }
+
+    gameState.update(laserConfig.lifetimeSeconds + 0.05f, InputState{});
+    gameState.update(0.01f, inputState);
+
+    expect(GameStateTestAccess::lasers(gameState).size() == 1, "a new shot should be allowed after active lasers expire");
 }
 
 void test_large_asteroid_splits_into_two_mediums() {
@@ -401,6 +449,62 @@ void test_destroying_small_asteroid_awards_100_points() {
     expect(GameStateTestAccess::score(gameState) == 100, "destroying small asteroid should award 100 points");
 }
 
+void test_awarding_score_increases_flash_energy() {
+    GameState gameState;
+    reset_world(gameState);
+
+    GameStateTestAccess::award_score(gameState, 20);
+
+    expect(std::abs(GameStateTestAccess::score_flash_energy(gameState) - 1.0f) < 0.0001f, "awarding score should add flash energy");
+}
+
+void test_score_flash_energy_stacks_on_repeated_scoring() {
+    GameState gameState;
+    reset_world(gameState);
+
+    GameStateTestAccess::award_score(gameState, 20);
+    GameStateTestAccess::award_score(gameState, 50);
+
+    expect(std::abs(GameStateTestAccess::score_flash_energy(gameState) - 2.0f) < 0.0001f, "flash energy should stack across repeated scores");
+}
+
+void test_score_flash_energy_decays_over_time() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::phase(gameState) = GamePhase::GameOver;
+    GameStateTestAccess::score_flash_energy(gameState) = 2.0f;
+
+    InputState inputState;
+    gameState.update(0.5f, inputState);
+
+    expect(GameStateTestAccess::score_flash_energy(gameState) < 2.0f, "flash energy should decay during update");
+    expect(GameStateTestAccess::score_flash_energy(gameState) > 0.0f, "flash energy should ease down instead of snapping to zero");
+}
+
+void test_reset_clears_score_flash_energy() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::score_flash_energy(gameState) = 3.0f;
+
+    gameState.reset();
+
+    expect(std::abs(GameStateTestAccess::score_flash_energy(gameState)) < 0.0001f, "reset should clear flash energy");
+}
+
+void test_hud_state_exposes_laser_color_and_flash_energy() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::score_flash_energy(gameState) = 1.75f;
+
+    const HudState hudState = gameState.hud_state();
+    const ColorRgb& laserColor = GameStateTestAccess::laser_config(gameState).color;
+
+    expect(std::abs(hudState.scoreFlashEnergy - 1.75f) < 0.0001f, "hud state should expose score flash energy");
+    expect(std::abs(hudState.laserColor.r - laserColor.r) < 0.0001f, "hud state should expose laser red");
+    expect(std::abs(hudState.laserColor.g - laserColor.g) < 0.0001f, "hud state should expose laser green");
+    expect(std::abs(hudState.laserColor.b - laserColor.b) < 0.0001f, "hud state should expose laser blue");
+}
+
 void test_ship_collision_triggers_dying_phase() {
     GameState gameState;
     reset_world(gameState);
@@ -558,6 +662,8 @@ void test_restart_from_game_over() {
 int main() {
     const std::vector<std::pair<std::string, void(*)()>> tests = {
         {"firing_creates_laser_and_render_data", test_firing_creates_laser_and_render_data},
+        {"firing_caps_active_lasers", test_firing_caps_active_lasers},
+        {"firing_resumes_after_active_shots_clear", test_firing_resumes_after_active_shots_clear},
         {"large_asteroid_splits_into_two_mediums", test_large_asteroid_splits_into_two_mediums},
         {"medium_asteroid_splits_into_two_smalls", test_medium_asteroid_splits_into_two_smalls},
         {"split_children_mutate_shape_and_shading_seed", test_split_children_mutate_shape_and_shading_seed},
@@ -568,6 +674,11 @@ int main() {
         {"destroying_large_asteroid_awards_20_points", test_destroying_large_asteroid_awards_20_points},
         {"destroying_medium_asteroid_awards_50_points", test_destroying_medium_asteroid_awards_50_points},
         {"destroying_small_asteroid_awards_100_points", test_destroying_small_asteroid_awards_100_points},
+        {"awarding_score_increases_flash_energy", test_awarding_score_increases_flash_energy},
+        {"score_flash_energy_stacks_on_repeated_scoring", test_score_flash_energy_stacks_on_repeated_scoring},
+        {"score_flash_energy_decays_over_time", test_score_flash_energy_decays_over_time},
+        {"reset_clears_score_flash_energy", test_reset_clears_score_flash_energy},
+        {"hud_state_exposes_laser_color_and_flash_energy", test_hud_state_exposes_laser_color_and_flash_energy},
         {"ship_collision_triggers_dying_phase", test_ship_collision_triggers_dying_phase},
         {"dying_transitions_to_respawning", test_dying_transitions_to_respawning},
         {"respawn_when_center_clear", test_respawn_when_center_clear},

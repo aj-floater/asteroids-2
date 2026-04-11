@@ -85,9 +85,10 @@ private:
     struct HudVertex {
         float position[2];
         float color[4];
+        float params[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
         static VkVertexInputBindingDescription binding_description();
-        static std::array<VkVertexInputAttributeDescription, 2> attribute_descriptions();
+        static std::array<VkVertexInputAttributeDescription, 3> attribute_descriptions();
     };
 
     struct OffscreenTarget {
@@ -230,7 +231,7 @@ private:
     VkDeviceMemory hudBufferMemory_ = VK_NULL_HANDLE;
     void* hudBufferMapped_ = nullptr;
     std::size_t hudVertexCount_ = 0;
-    static constexpr std::size_t kMaxHudVertices = 2048;
+    static constexpr std::size_t kMaxHudVertices = 4096;
 
     float elapsedTimeSeconds_ = 0.0f;
 
