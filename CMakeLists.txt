@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(CTest)
+
 find_package(Vulkan REQUIRED)
 find_package(glfw3 CONFIG QUIET)
 
@@ -193,4 +195,21 @@ if(MSVC)
   target_compile_options(asteroids PRIVATE /W4 /permissive-)
 else()
   target_compile_options(asteroids PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(game_state_tests
+    tests/game_state_tests.cpp
+    src/game_state.cpp
+  )
+
+  target_include_directories(game_state_tests PRIVATE src)
+
+  if(MSVC)
+    target_compile_options(game_state_tests PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(game_state_tests PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+
+  add_test(NAME game_state_tests COMMAND game_state_tests)
 endif()

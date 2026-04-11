@@ -15,6 +15,13 @@ constexpr float kMaxSpeed = 90.0f;
 constexpr float kCollisionEpsilon = 0.0001f;
 constexpr float kShipCollisionScale = 0.8f;
 constexpr float kTau = 6.28318530717958647692f;
+constexpr float kShardSpreadRadians = 1.45f;
+constexpr float kSmokeSpreadRadians = 2.15f;
+constexpr float kShardAspectRatioMin = 0.8f;
+constexpr float kShardAspectRatioMax = 1.25f;
+constexpr float kSmokeBehindChance = 0.6f;
+constexpr float kShardAlpha = 0.72f;
+constexpr float kSmokeAlpha = 0.58f;
 
 struct Triangle {
     std::array<Vec2, 3> points{};
@@ -39,6 +46,53 @@ Vec2 rotate_point(const Vec2& point, float radians) {
         point.x * cosine - point.y * sine,
         point.x * sine + point.y * cosine,
     };
+}
+
+float dot_product(const Vec2& lhs, const Vec2& rhs) {
+    return lhs.x * rhs.x + lhs.y * rhs.y;
+}
+
+float cross_product(const Vec2& lhs, const Vec2& rhs) {
+    return lhs.x * rhs.y - lhs.y * rhs.x;
+}
+
+Vec2 normalized_or_zero(const Vec2& value) {
+    const float valueLength = length(value);
+    if (valueLength <= kCollisionEpsilon) {
+        return {};
+    }
+
+    return value * (1.0f / valueLength);
+}
+
+float angle_from_vector(const Vec2& value) {
+    return std::atan2(value.y, value.x);
+}
+
+Vec2 reflected_vector(const Vec2& direction, const Vec2& normal) {
+    return direction - (2.0f * dot_product(direction, normal) * normal);
+}
+
+struct SegmentIntersection {
+    float t = 0.0f;
+    Vec2 point{};
+    Vec2 normal{};
+};
+
+float distance_squared_to_segment(const Vec2& point, const Vec2& start, const Vec2& end) {
+    const Vec2 segment = end - start;
+    const float segmentLengthSquared = length_squared(segment);
+    if (segmentLengthSquared <= kCollisionEpsilon) {
+        return length_squared(point - start);
+    }
+
+    const float projection = std::clamp(
+        dot_product(point - start, segment) / segmentLengthSquared,
+        0.0f,
+        1.0f
+    );
+    const Vec2 closestPoint = start + segment * projection;
+    return length_squared(point - closestPoint);
 }
 
 std::array<Triangle, 2> ship_world_triangles(const ShipState& shipState) {
@@ -157,6 +211,84 @@ bool bounds_overlap(const Bounds& lhs, const Bounds& rhs) {
         lhs.maxY >= rhs.minY;
 }
 
+std::array<Vec2, AsteroidRenderData::kMaxVertexCount> asteroid_world_vertices(const AsteroidState& asteroid) {
+    std::array<Vec2, AsteroidRenderData::kMaxVertexCount> worldVertices{};
+    const float cosine = std::cos(asteroid.rotationRadians);
+    const float sine = std::sin(asteroid.rotationRadians);
+    for (std::size_t index = 0; index < asteroid.vertexCount; ++index) {
+        const Vec2 localVertex = asteroid.localVertices[index];
+        worldVertices[index] = {
+            asteroid.position.x + localVertex.x * cosine - localVertex.y * sine,
+            asteroid.position.y + localVertex.x * sine + localVertex.y * cosine,
+        };
+    }
+
+    return worldVertices;
+}
+
+Bounds bounds_from_segment(const Vec2& start, const Vec2& end) {
+    return {
+        .minX = std::min(start.x, end.x),
+        .maxX = std::max(start.x, end.x),
+        .minY = std::min(start.y, end.y),
+        .maxY = std::max(start.y, end.y),
+    };
+}
+
+bool point_in_asteroid(
+    const Vec2& point,
+    const AsteroidState& asteroid,
+    const std::array<Vec2, AsteroidRenderData::kMaxVertexCount>& worldVertices
+) {
+    for (std::size_t vertexIndex = 0; vertexIndex < asteroid.vertexCount; ++vertexIndex) {
+        const Triangle triangle{{
+            asteroid.position,
+            worldVertices[vertexIndex],
+            worldVertices[(vertexIndex + 1) % asteroid.vertexCount],
+        }};
+        if (point_in_triangle(point, triangle)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::optional<SegmentIntersection> segment_intersection(
+    const Vec2& segmentStart,
+    const Vec2& segmentEnd,
+    const Vec2& edgeStart,
+    const Vec2& edgeEnd,
+    const Vec2& incomingDirection
+) {
+    const Vec2 segmentDelta = segmentEnd - segmentStart;
+    const Vec2 edgeDelta = edgeEnd - edgeStart;
+    const float denominator = cross_product(segmentDelta, edgeDelta);
+    if (std::abs(denominator) <= kCollisionEpsilon) {
+        return std::nullopt;
+    }
+
+    const Vec2 offset = edgeStart - segmentStart;
+    const float t = cross_product(offset, edgeDelta) / denominator;
+    const float u = cross_product(offset, segmentDelta) / denominator;
+    if (t < -kCollisionEpsilon || t > 1.0f + kCollisionEpsilon || u < -kCollisionEpsilon || u > 1.0f + kCollisionEpsilon) {
+        return std::nullopt;
+    }
+
+    Vec2 normal = normalized_or_zero({edgeDelta.y, -edgeDelta.x});
+    if (length_squared(normal) <= kCollisionEpsilon) {
+        normal = incomingDirection * -1.0f;
+    } else if (dot_product(normal, incomingDirection) > 0.0f) {
+        normal *= -1.0f;
+    }
+
+    return SegmentIntersection{
+        .t = std::clamp(t, 0.0f, 1.0f),
+        .point = segmentStart + segmentDelta * std::clamp(t, 0.0f, 1.0f),
+        .normal = normal,
+    };
+}
+
 }
 
 GameState::GameState() {
@@ -165,9 +297,10 @@ GameState::GameState() {
     shipState_.headingRadians = std::numbers::pi_v<float> * 0.5f;
     shipState_.angularVelocityRadiansPerSecond = 0.0f;
     rngState_ = asteroidConfig_.randomSeed;
-    asteroids_.reserve(asteroidConfig_.asteroidCount);
-    asteroidRenderData_.reserve(asteroidConfig_.asteroidCount);
-    particles_.reserve(flameConfig_.maxParticles);
+    asteroids_.reserve(asteroidConfig_.asteroidCount * 4);
+    asteroidRenderData_.reserve(asteroidConfig_.asteroidCount * 4);
+    effectParticles_.reserve(flameConfig_.maxParticles);
+    lasers_.reserve(64);
     particleRenderData_.reserve(flameConfig_.maxParticles);
     initialize_asteroids();
 }
@@ -226,7 +359,11 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
     shipState_.position += shipState_.velocity * deltaTimeSeconds;
     wrap_position(shipState_.position);
     update_asteroids(deltaTimeSeconds);
-    update_particles(deltaTimeSeconds);
+    update_lasers(deltaTimeSeconds);
+    update_effect_particles(deltaTimeSeconds);
+    resolve_laser_asteroid_hits();
+    rebuild_asteroid_render_data();
+    rebuild_particle_render_data();
     update_ship_collision_state();
     if (shipColliding_) {
         shipState_.position = {0.0f, 0.0f};
@@ -284,28 +421,75 @@ ColorRgb GameState::particle_color_at_life(const EffectParticle& particle, float
     return lerp_color(particle.midColor, particle.endColor, (normalizedAge - 0.45f) / 0.55f);
 }
 
+EffectParticleRenderData GameState::render_data_from_effect_particle(const EffectParticle& particle) const {
+    const float normalizedAge = std::clamp(particle.ageSeconds / particle.lifetimeSeconds, 0.0f, 1.0f);
+    const float renderAlpha = particle.fadeAlphaOverLife
+        ? particle.alpha * (1.0f - normalizedAge)
+        : particle.alpha;
+    const float renderSize = particle.scaleDownOverLife
+        ? particle.size * (1.0f - 0.35f * normalizedAge)
+        : particle.size;
+
+    return {
+        .position = particle.position,
+        .color = particle_color_at_life(particle, normalizedAge),
+        .alpha = renderAlpha,
+        .size = renderSize,
+        .rotationRadians = particle.rotationRadians,
+        .aspectRatio = particle.aspectRatio,
+        .shape = particle.shape,
+        .glowScale = particle.glowScale,
+        .glowIntensity = particle.glowIntensity,
+        .bloomIntensity = particle.bloomIntensity,
+        .lightIntensity = particle.lightIntensity,
+        .renderLayer = particle.renderLayer,
+    };
+}
+
+EffectParticleRenderData GameState::render_data_from_laser(const LaserState& laser) const {
+    return {
+        .position = laser.position,
+        .color = laserConfig_.color,
+        .alpha = 1.0f,
+        .size = laserConfig_.length,
+        .rotationRadians = laser.headingRadians,
+        .aspectRatio = laserConfig_.width / laserConfig_.length,
+        .shape = ParticleShape::Rectangle,
+        .glowScale = laserConfig_.glowScale,
+        .glowIntensity = laserConfig_.glowIntensity,
+        .bloomIntensity = laserConfig_.bloomIntensity,
+        .lightIntensity = laserConfig_.lightIntensity,
+        .renderLayer = ParticleRenderLayer::Front,
+    };
+}
+
+bool GameState::try_emit_effect_particle(const EffectParticle& particle) {
+    if (effectParticles_.size() + lasers_.size() >= flameConfig_.maxParticles) {
+        return false;
+    }
+
+    effectParticles_.push_back(particle);
+    return true;
+}
+
 void GameState::initialize_asteroids() {
     asteroids_.clear();
     asteroidRenderData_.clear();
+    effectParticles_.clear();
+    lasers_.clear();
+    particleRenderData_.clear();
 
     for (std::size_t index = 0; index < asteroidConfig_.asteroidCount; ++index) {
         asteroids_.push_back(spawn_asteroid());
     }
 
-    asteroidRenderData_.reserve(asteroids_.size());
-    for (const AsteroidState& asteroid : asteroids_) {
-        asteroidRenderData_.push_back({
-            .localVertices = asteroid.localVertices,
-            .vertexCount = asteroid.vertexCount,
-            .position = asteroid.position,
-            .rotationRadians = asteroid.rotationRadians,
-            .shadingSeed = asteroid.shadingSeed,
-        });
-    }
+    rebuild_asteroid_render_data();
+    rebuild_particle_render_data();
 }
 
 AsteroidState GameState::spawn_asteroid() {
     AsteroidState asteroid{};
+    asteroid.sizeClass = AsteroidSizeClass::Large;
     asteroid.vertexCount = random_index(asteroidConfig_.minVertexCount, asteroidConfig_.maxVertexCount);
     const float baseSize = random_range(asteroidConfig_.minSize, asteroidConfig_.maxSize);
     const float angleStep = kTau / static_cast<float>(asteroid.vertexCount);
@@ -364,6 +548,99 @@ AsteroidState GameState::spawn_asteroid() {
     return asteroid;
 }
 
+std::optional<AsteroidSizeClass> GameState::next_size_class(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large:
+        return AsteroidSizeClass::Medium;
+    case AsteroidSizeClass::Medium:
+        return AsteroidSizeClass::Small;
+    case AsteroidSizeClass::Small:
+        return std::nullopt;
+    }
+
+    return std::nullopt;
+}
+
+float GameState::child_scale_for_size_class(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large:
+        return 1.0f;
+    case AsteroidSizeClass::Medium:
+        return asteroidConfig_.mediumScale;
+    case AsteroidSizeClass::Small:
+        return asteroidConfig_.smallScale;
+    }
+
+    return 1.0f;
+}
+
+std::size_t GameState::shard_count_for_size(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large:
+        return asteroidBurstEffectConfig_.largeShardCount;
+    case AsteroidSizeClass::Medium:
+        return asteroidBurstEffectConfig_.mediumShardCount;
+    case AsteroidSizeClass::Small:
+        return asteroidBurstEffectConfig_.smallShardCount;
+    }
+
+    return asteroidBurstEffectConfig_.smallShardCount;
+}
+
+std::size_t GameState::smoke_count_for_size(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large:
+        return asteroidBurstEffectConfig_.largeSmokeCount;
+    case AsteroidSizeClass::Medium:
+        return asteroidBurstEffectConfig_.mediumSmokeCount;
+    case AsteroidSizeClass::Small:
+        return asteroidBurstEffectConfig_.smallSmokeCount;
+    }
+
+    return asteroidBurstEffectConfig_.smallSmokeCount;
+}
+
+std::vector<AsteroidState> GameState::split_asteroid(const AsteroidState& asteroid) {
+    const std::optional<AsteroidSizeClass> childSizeClass = next_size_class(asteroid.sizeClass);
+    if (!childSizeClass.has_value()) {
+        return {};
+    }
+
+    const float childScale = child_scale_for_size_class(childSizeClass.value());
+    const float parentSpeed = length(asteroid.velocity);
+    const float baseHeading = parentSpeed > kCollisionEpsilon
+        ? std::atan2(asteroid.velocity.y, asteroid.velocity.x)
+        : 0.0f;
+    const float childSpeed = std::max(
+        asteroidConfig_.minSpeed,
+        parentSpeed * asteroidConfig_.childSpeedMultiplier
+    );
+
+    std::vector<AsteroidState> children;
+    children.reserve(2);
+
+    for (float directionSign : {-1.0f, 1.0f}) {
+        AsteroidState child = asteroid;
+        child.sizeClass = childSizeClass.value();
+        child.outerRadius = asteroid.outerRadius * childScale;
+        for (std::size_t index = 0; index < child.vertexCount; ++index) {
+            child.localVertices[index] = asteroid.localVertices[index] * childScale;
+        }
+
+        const float headingOffset =
+            directionSign * asteroidConfig_.childSeparationAngleRadians +
+            random_range(-asteroidConfig_.childHeadingJitterRadians, asteroidConfig_.childHeadingJitterRadians);
+        const float childHeading = baseHeading + headingOffset;
+        child.velocity = forward_from_angle(childHeading) * childSpeed;
+        child.rotationRadians = asteroid.rotationRadians;
+        child.angularVelocityRadiansPerSecond =
+            asteroid.angularVelocityRadiansPerSecond * asteroidConfig_.childAngularSpeedMultiplier;
+        children.push_back(child);
+    }
+
+    return children;
+}
+
 GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& asteroid, Vec2 positionOffset) const {
     AsteroidBounds bounds{};
     if (asteroid.vertexCount == 0) {
@@ -399,6 +676,33 @@ GameState::AsteroidBounds GameState::asteroid_bounds(const AsteroidState& astero
     return bounds;
 }
 
+void GameState::rebuild_asteroid_render_data() {
+    asteroidRenderData_.clear();
+    asteroidRenderData_.reserve(asteroids_.size());
+    for (const AsteroidState& asteroid : asteroids_) {
+        asteroidRenderData_.push_back({
+            .localVertices = asteroid.localVertices,
+            .vertexCount = asteroid.vertexCount,
+            .position = asteroid.position,
+            .rotationRadians = asteroid.rotationRadians,
+            .shadingSeed = asteroid.shadingSeed,
+        });
+    }
+}
+
+void GameState::rebuild_particle_render_data() {
+    particleRenderData_.clear();
+    particleRenderData_.reserve(effectParticles_.size() + lasers_.size());
+
+    for (const EffectParticle& particle : effectParticles_) {
+        particleRenderData_.push_back(render_data_from_effect_particle(particle));
+    }
+
+    for (const LaserState& laser : lasers_) {
+        particleRenderData_.push_back(render_data_from_laser(laser));
+    }
+}
+
 void GameState::wrap_asteroid(AsteroidState& asteroid) const {
     const AsteroidBounds bounds = asteroid_bounds(asteroid);
     const float width = bounds.maxX - bounds.minX;
@@ -417,6 +721,265 @@ void GameState::wrap_asteroid(AsteroidState& asteroid) const {
     }
 }
 
+std::optional<GameState::LaserImpactEvent> GameState::find_laser_impact(const LaserState& laser) const {
+    Vec2 incomingDirection = normalized_or_zero(laser.position - laser.previousPosition);
+    if (length_squared(incomingDirection) <= kCollisionEpsilon) {
+        incomingDirection = normalized_or_zero(laser.velocity);
+    }
+    if (length_squared(incomingDirection) <= kCollisionEpsilon) {
+        incomingDirection = {1.0f, 0.0f};
+    }
+
+    std::optional<LaserImpactEvent> closestImpact;
+    const Bounds laserBounds = bounds_from_segment(laser.previousPosition, laser.position);
+
+    for (std::size_t asteroidIndex = 0; asteroidIndex < asteroids_.size(); ++asteroidIndex) {
+        const AsteroidState& asteroid = asteroids_[asteroidIndex];
+        if (asteroid.vertexCount < 3) {
+            continue;
+        }
+
+        const float asteroidRadiusSquared = asteroid.outerRadius * asteroid.outerRadius;
+        if (distance_squared_to_segment(asteroid.position, laser.previousPosition, laser.position) > asteroidRadiusSquared) {
+            continue;
+        }
+
+        const AsteroidBounds asteroidBounds = asteroid_bounds(asteroid);
+        const Bounds visibleBounds{
+            .minX = asteroidBounds.minX,
+            .maxX = asteroidBounds.maxX,
+            .minY = asteroidBounds.minY,
+            .maxY = asteroidBounds.maxY,
+        };
+        if (!bounds_overlap(visibleBounds, laserBounds)) {
+            continue;
+        }
+
+        const std::array<Vec2, AsteroidRenderData::kMaxVertexCount> worldVertices = asteroid_world_vertices(asteroid);
+        std::optional<LaserImpactEvent> asteroidImpact;
+
+        for (std::size_t vertexIndex = 0; vertexIndex < asteroid.vertexCount; ++vertexIndex) {
+            const Vec2 edgeStart = worldVertices[vertexIndex];
+            const Vec2 edgeEnd = worldVertices[(vertexIndex + 1) % asteroid.vertexCount];
+            const std::optional<SegmentIntersection> intersection = segment_intersection(
+                laser.previousPosition,
+                laser.position,
+                edgeStart,
+                edgeEnd,
+                incomingDirection
+            );
+            if (!intersection.has_value()) {
+                continue;
+            }
+
+            if (!asteroidImpact.has_value() || intersection->t < asteroidImpact->distanceAlongLaser) {
+                asteroidImpact = LaserImpactEvent{
+                    .asteroidIndex = asteroidIndex,
+                    .impactPosition = intersection->point,
+                    .impactNormal = intersection->normal,
+                    .asteroidSizeClass = asteroid.sizeClass,
+                    .distanceAlongLaser = intersection->t,
+                };
+            }
+        }
+
+        if (!asteroidImpact.has_value()) {
+            const bool previousInside = point_in_asteroid(laser.previousPosition, asteroid, worldVertices);
+            const bool currentInside = point_in_asteroid(laser.position, asteroid, worldVertices);
+            if (!previousInside && !currentInside) {
+                continue;
+            }
+
+            const bool usePreviousPosition = previousInside;
+            Vec2 fallbackNormal = normalized_or_zero(
+                (usePreviousPosition ? laser.previousPosition : laser.position) - asteroid.position
+            );
+            if (length_squared(fallbackNormal) <= kCollisionEpsilon) {
+                fallbackNormal = incomingDirection * -1.0f;
+            } else if (dot_product(fallbackNormal, incomingDirection) > 0.0f) {
+                fallbackNormal *= -1.0f;
+            }
+
+            asteroidImpact = LaserImpactEvent{
+                .asteroidIndex = asteroidIndex,
+                .impactPosition = usePreviousPosition ? laser.previousPosition : laser.position,
+                .impactNormal = fallbackNormal,
+                .asteroidSizeClass = asteroid.sizeClass,
+                .distanceAlongLaser = usePreviousPosition ? 0.0f : 1.0f,
+            };
+        }
+
+        if (!closestImpact.has_value() || asteroidImpact->distanceAlongLaser < closestImpact->distanceAlongLaser) {
+            closestImpact = asteroidImpact;
+        }
+    }
+
+    return closestImpact;
+}
+
+void GameState::emit_laser_impact_particles(const LaserState& laser, const LaserImpactEvent& impactEvent) {
+    const Vec2 incomingDirection = [&]() {
+        Vec2 direction = normalized_or_zero(laser.velocity);
+        if (length_squared(direction) <= kCollisionEpsilon) {
+            direction = normalized_or_zero(laser.position - laser.previousPosition);
+        }
+        return length_squared(direction) <= kCollisionEpsilon ? Vec2{1.0f, 0.0f} : direction;
+    }();
+
+    Vec2 reflectedDirection = normalized_or_zero(reflected_vector(incomingDirection, impactEvent.impactNormal));
+    if (length_squared(reflectedDirection) <= kCollisionEpsilon) {
+        reflectedDirection = impactEvent.impactNormal;
+    }
+    const float baseAngle = angle_from_vector(reflectedDirection);
+
+    for (std::size_t index = 0; index < laserImpactEffectConfig_.particlesPerHit; ++index) {
+        EffectParticle particle{};
+        const float emissionAngle = baseAngle + random_range(
+            -laserImpactEffectConfig_.spreadRadians,
+            laserImpactEffectConfig_.spreadRadians
+        );
+        particle.position = impactEvent.impactPosition;
+        particle.velocity =
+            forward_from_angle(emissionAngle) *
+            random_range(laserImpactEffectConfig_.minSpeed, laserImpactEffectConfig_.maxSpeed);
+        particle.startColor = laserImpactEffectConfig_.startColor;
+        particle.midColor = laserImpactEffectConfig_.midColor;
+        particle.endColor = laserImpactEffectConfig_.endColor;
+        particle.ageSeconds = 0.0f;
+        particle.lifetimeSeconds = random_range(
+            laserImpactEffectConfig_.minLifetimeSeconds,
+            laserImpactEffectConfig_.maxLifetimeSeconds
+        );
+        particle.size = random_range(laserImpactEffectConfig_.minSize, laserImpactEffectConfig_.maxSize);
+        particle.alpha = 1.0f;
+        particle.rotationRadians = emissionAngle;
+        particle.aspectRatio = random_range(
+            laserImpactEffectConfig_.widthRatioMin,
+            laserImpactEffectConfig_.widthRatioMax
+        );
+        particle.glowScale = laserImpactEffectConfig_.glowScale;
+        particle.glowIntensity = laserImpactEffectConfig_.glowIntensity;
+        particle.bloomIntensity = laserImpactEffectConfig_.bloomIntensity;
+        particle.lightIntensity = laserImpactEffectConfig_.lightIntensity;
+        particle.fadeAlphaOverLife = true;
+        particle.scaleDownOverLife = true;
+        particle.shape = ParticleShape::Rectangle;
+        particle.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        particle.renderLayer = ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(particle)) {
+            break;
+        }
+    }
+}
+
+void GameState::emit_asteroid_destruction_particles(const AsteroidState& asteroid, const LaserImpactEvent& impactEvent) {
+    const Vec2 burstOrigin = impactEvent.impactPosition * 0.7f + asteroid.position * 0.3f;
+    Vec2 outwardDirection = normalized_or_zero(impactEvent.impactNormal);
+    if (length_squared(outwardDirection) <= kCollisionEpsilon) {
+        outwardDirection = {1.0f, 0.0f};
+    }
+    const float baseAngle = angle_from_vector(outwardDirection);
+
+    for (std::size_t index = 0; index < shard_count_for_size(asteroid.sizeClass); ++index) {
+        EffectParticle shard{};
+        const float emissionAngle = baseAngle + random_range(-kShardSpreadRadians, kShardSpreadRadians);
+        shard.position = burstOrigin;
+        shard.velocity =
+            asteroid.velocity * 0.35f +
+            forward_from_angle(emissionAngle) *
+            random_range(asteroidBurstEffectConfig_.minShardSpeed, asteroidBurstEffectConfig_.maxShardSpeed);
+        shard.startColor = asteroidBurstEffectConfig_.shardStartColor;
+        shard.midColor = asteroidBurstEffectConfig_.shardMidColor;
+        shard.endColor = asteroidBurstEffectConfig_.shardEndColor;
+        shard.ageSeconds = 0.0f;
+        shard.lifetimeSeconds = random_range(
+            asteroidBurstEffectConfig_.minShardLifetimeSeconds,
+            asteroidBurstEffectConfig_.maxShardLifetimeSeconds
+        );
+        shard.size =
+            asteroid.outerRadius *
+            random_range(asteroidBurstEffectConfig_.minShardSizeFactor, asteroidBurstEffectConfig_.maxShardSizeFactor);
+        shard.alpha = kShardAlpha;
+        shard.rotationRadians = random_range(0.0f, kTau);
+        shard.aspectRatio = random_range(kShardAspectRatioMin, kShardAspectRatioMax);
+        shard.glowScale = 2.2f;
+        shard.glowIntensity = 0.22f;
+        shard.bloomIntensity = 0.5f;
+        shard.lightIntensity = 0.14f;
+        shard.fadeAlphaOverLife = true;
+        shard.scaleDownOverLife = true;
+        shard.shape = ParticleShape::Square;
+        shard.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        shard.renderLayer = ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(shard)) {
+            break;
+        }
+    }
+
+    for (std::size_t index = 0; index < smoke_count_for_size(asteroid.sizeClass); ++index) {
+        EffectParticle smoke{};
+        const float emissionAngle = baseAngle + random_range(-kSmokeSpreadRadians, kSmokeSpreadRadians);
+        smoke.position = burstOrigin;
+        smoke.velocity =
+            asteroid.velocity * 0.45f +
+            forward_from_angle(emissionAngle) *
+            random_range(asteroidBurstEffectConfig_.minSmokeSpeed, asteroidBurstEffectConfig_.maxSmokeSpeed);
+        smoke.startColor = asteroidBurstEffectConfig_.smokeStartColor;
+        smoke.midColor = asteroidBurstEffectConfig_.smokeMidColor;
+        smoke.endColor = asteroidBurstEffectConfig_.smokeEndColor;
+        smoke.ageSeconds = 0.0f;
+        smoke.lifetimeSeconds = random_range(
+            asteroidBurstEffectConfig_.minSmokeLifetimeSeconds,
+            asteroidBurstEffectConfig_.maxSmokeLifetimeSeconds
+        );
+        smoke.size =
+            asteroid.outerRadius *
+            random_range(asteroidBurstEffectConfig_.minSmokeSizeFactor, asteroidBurstEffectConfig_.maxSmokeSizeFactor);
+        smoke.alpha = kSmokeAlpha;
+        smoke.rotationRadians = random_range(0.0f, kTau);
+        smoke.aspectRatio = random_range(0.92f, 1.32f);
+        smoke.glowScale = 3.1f;
+        smoke.glowIntensity = 0.38f;
+        smoke.bloomIntensity = 0.95f;
+        smoke.lightIntensity = 0.18f;
+        smoke.fadeAlphaOverLife = true;
+        smoke.scaleDownOverLife = true;
+        smoke.shape = ParticleShape::Square;
+        smoke.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        smoke.renderLayer =
+            random_range(0.0f, 1.0f) < kSmokeBehindChance
+            ? ParticleRenderLayer::BehindAsteroids
+            : ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(smoke)) {
+            break;
+        }
+    }
+}
+
+void GameState::resolve_laser_asteroid_hits() {
+    std::size_t writeIndex = 0;
+    for (std::size_t readIndex = 0; readIndex < lasers_.size(); ++readIndex) {
+        const LaserState& laser = lasers_[readIndex];
+        const std::optional<LaserImpactEvent> impactEvent = find_laser_impact(laser);
+        if (!impactEvent.has_value()) {
+            lasers_[writeIndex] = laser;
+            ++writeIndex;
+            continue;
+        }
+
+        const AsteroidState hitAsteroid = asteroids_[impactEvent->asteroidIndex];
+        emit_laser_impact_particles(laser, impactEvent.value());
+        emit_asteroid_destruction_particles(hitAsteroid, impactEvent.value());
+
+        std::vector<AsteroidState> childAsteroids = split_asteroid(hitAsteroid);
+        asteroids_.erase(asteroids_.begin() + static_cast<std::ptrdiff_t>(impactEvent->asteroidIndex));
+        asteroids_.reserve(asteroids_.size() + childAsteroids.size());
+        asteroids_.insert(asteroids_.end(), childAsteroids.begin(), childAsteroids.end());
+    }
+
+    lasers_.resize(writeIndex);
+}
+
 void GameState::update_ship_collision_state() {
     shipColliding_ = false;
     collidingAsteroidIndex_.reset();
@@ -430,8 +993,6 @@ void GameState::update_ship_collision_state() {
             continue;
         }
 
-        const float cosine = std::cos(asteroid.rotationRadians);
-        const float sine = std::sin(asteroid.rotationRadians);
         const AsteroidBounds asteroidBounds = asteroid_bounds(asteroid);
         const Bounds visibleBounds{
             .minX = asteroidBounds.minX,
@@ -443,21 +1004,12 @@ void GameState::update_ship_collision_state() {
             continue;
         }
 
-        const Vec2 asteroidCenter = asteroid.position;
-        std::array<Vec2, AsteroidRenderData::kMaxVertexCount> asteroidWorldVertices{};
-        for (std::size_t vertexIndex = 0; vertexIndex < asteroid.vertexCount; ++vertexIndex) {
-            const Vec2 localVertex = asteroid.localVertices[vertexIndex];
-            asteroidWorldVertices[vertexIndex] = {
-                asteroidCenter.x + localVertex.x * cosine - localVertex.y * sine,
-                asteroidCenter.y + localVertex.x * sine + localVertex.y * cosine,
-            };
-        }
-
+        const std::array<Vec2, AsteroidRenderData::kMaxVertexCount> worldVertices = asteroid_world_vertices(asteroid);
         for (std::size_t vertexIndex = 0; vertexIndex < asteroid.vertexCount; ++vertexIndex) {
             const Triangle asteroidTriangle{{
-                asteroidCenter,
-                asteroidWorldVertices[vertexIndex],
-                asteroidWorldVertices[(vertexIndex + 1) % asteroid.vertexCount],
+                asteroid.position,
+                worldVertices[vertexIndex],
+                worldVertices[(vertexIndex + 1) % asteroid.vertexCount],
             }};
 
             for (const Triangle& shipTriangle : shipTriangles) {
@@ -480,7 +1032,7 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
     emissionAccumulator_ -= particlesToEmitFloat;
 
     for (std::size_t index = 0; index < particlesToEmit; ++index) {
-        if (particles_.size() >= flameConfig_.maxParticles) {
+        if (effectParticles_.size() + lasers_.size() >= flameConfig_.maxParticles) {
             break;
         }
 
@@ -535,12 +1087,12 @@ void GameState::emit_thrust_particles(float deltaTimeSeconds) {
             random_range(0.0f, 1.0f) < flameConfig_.backgroundParticleChance
             ? ParticleRenderLayer::BehindAsteroids
             : ParticleRenderLayer::Front;
-        particles_.push_back(particle);
+        effectParticles_.push_back(particle);
     }
 }
 
 void GameState::emit_laser_shot() {
-    if (particles_.size() >= flameConfig_.maxParticles) {
+    if (effectParticles_.size() + lasers_.size() >= flameConfig_.maxParticles) {
         return;
     }
 
@@ -551,36 +1103,41 @@ void GameState::emit_laser_shot() {
         forward * laserConfig_.localSpawnPoint.x +
         left * laserConfig_.localSpawnPoint.y;
 
-    EffectParticle particle{};
-    particle.position = muzzlePosition;
-    particle.velocity =
+    LaserState laser{};
+    laser.position = muzzlePosition;
+    laser.previousPosition = muzzlePosition;
+    laser.velocity =
         forward * laserConfig_.speed +
         shipState_.velocity * laserConfig_.inheritedVelocityFactor;
-    particle.startColor = laserConfig_.color;
-    particle.midColor = laserConfig_.color;
-    particle.endColor = laserConfig_.color;
-    particle.ageSeconds = 0.0f;
-    particle.lifetimeSeconds = 8.0f;
-    particle.size = laserConfig_.length;
-    particle.alpha = 1.0f;
-    particle.rotationRadians = shipState_.headingRadians;
-    particle.aspectRatio = laserConfig_.width / laserConfig_.length;
-    particle.glowScale = laserConfig_.glowScale;
-    particle.glowIntensity = laserConfig_.glowIntensity;
-    particle.bloomIntensity = laserConfig_.bloomIntensity;
-    particle.lightIntensity = laserConfig_.lightIntensity;
-    particle.fadeAlphaOverLife = false;
-    particle.scaleDownOverLife = false;
-    particle.shape = ParticleShape::Rectangle;
-    particle.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
-    particle.renderLayer = ParticleRenderLayer::Front;
-    particles_.push_back(particle);
+    laser.headingRadians = shipState_.headingRadians;
+    laser.ageSeconds = 0.0f;
+    laser.lifetimeSeconds = laserConfig_.lifetimeSeconds;
+    lasers_.push_back(laser);
+}
+
+void GameState::update_lasers(float deltaTimeSeconds) {
+    std::size_t writeIndex = 0;
+    for (std::size_t readIndex = 0; readIndex < lasers_.size(); ++readIndex) {
+        LaserState laser = lasers_[readIndex];
+        laser.ageSeconds += deltaTimeSeconds;
+        if (laser.ageSeconds >= laser.lifetimeSeconds) {
+            continue;
+        }
+
+        laser.previousPosition = laser.position;
+        laser.position += laser.velocity * deltaTimeSeconds;
+        if (is_out_of_bounds(laser.position)) {
+            continue;
+        }
+
+        lasers_[writeIndex] = laser;
+        ++writeIndex;
+    }
+
+    lasers_.resize(writeIndex);
 }
 
 void GameState::update_asteroids(float deltaTimeSeconds) {
-    asteroidRenderData_.clear();
-    asteroidRenderData_.reserve(asteroids_.size());
-
     for (AsteroidState& asteroid : asteroids_) {
         asteroid.position += asteroid.velocity * deltaTimeSeconds;
 
@@ -592,23 +1149,13 @@ void GameState::update_asteroids(float deltaTimeSeconds) {
         }
 
         wrap_asteroid(asteroid);
-
-        asteroidRenderData_.push_back({
-            .localVertices = asteroid.localVertices,
-            .vertexCount = asteroid.vertexCount,
-            .position = asteroid.position,
-            .rotationRadians = asteroid.rotationRadians,
-            .shadingSeed = asteroid.shadingSeed,
-        });
     }
 }
 
-void GameState::update_particles(float deltaTimeSeconds) {
-    particleRenderData_.clear();
-
+void GameState::update_effect_particles(float deltaTimeSeconds) {
     std::size_t writeIndex = 0;
-    for (std::size_t readIndex = 0; readIndex < particles_.size(); ++readIndex) {
-        EffectParticle particle = particles_[readIndex];
+    for (std::size_t readIndex = 0; readIndex < effectParticles_.size(); ++readIndex) {
+        EffectParticle particle = effectParticles_[readIndex];
         particle.ageSeconds += deltaTimeSeconds;
         if (particle.ageSeconds >= particle.lifetimeSeconds) {
             continue;
@@ -621,34 +1168,11 @@ void GameState::update_particles(float deltaTimeSeconds) {
             continue;
         }
 
-        const float normalizedAge = std::clamp(particle.ageSeconds / particle.lifetimeSeconds, 0.0f, 1.0f);
-        const float renderAlpha = particle.fadeAlphaOverLife
-            ? particle.alpha * (1.0f - normalizedAge)
-            : particle.alpha;
-        const float renderSize = particle.scaleDownOverLife
-            ? particle.size * (1.0f - 0.35f * normalizedAge)
-            : particle.size;
-
-        particleRenderData_.push_back({
-            .position = particle.position,
-            .color = particle_color_at_life(particle, normalizedAge),
-            .alpha = renderAlpha,
-            .size = renderSize,
-            .rotationRadians = particle.rotationRadians,
-            .aspectRatio = particle.aspectRatio,
-            .shape = particle.shape,
-            .glowScale = particle.glowScale,
-            .glowIntensity = particle.glowIntensity,
-            .bloomIntensity = particle.bloomIntensity,
-            .lightIntensity = particle.lightIntensity,
-            .renderLayer = particle.renderLayer,
-        });
-
-        particles_[writeIndex] = particle;
+        effectParticles_[writeIndex] = particle;
         ++writeIndex;
     }
 
-    particles_.resize(writeIndex);
+    effectParticles_.resize(writeIndex);
 }
 
 void GameState::wrap_position(Vec2& position) const {
