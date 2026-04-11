@@ -25,6 +25,22 @@ constexpr float kSmokeAlpha = 0.58f;
 constexpr float kGlowSpreadRadians = 0.95f;
 constexpr float kGlowAlpha = 0.95f;
 
+constexpr float kDeathAnimationSeconds = 1.5f;
+constexpr float kWaveTransitionSeconds = 2.0f;
+constexpr float kInvulnerabilitySeconds = 3.0f;
+constexpr float kInvulnerabilityFlashHz = 8.0f;
+constexpr float kRespawnSafeRadius = 20.0f;
+constexpr std::uint32_t kInitialLives = 3;
+constexpr std::uint32_t kExtraLifeThreshold = 10000;
+constexpr std::uint32_t kScoreLarge = 20;
+constexpr std::uint32_t kScoreMedium = 50;
+constexpr std::uint32_t kScoreSmall = 100;
+constexpr std::size_t kInitialWaveAsteroidCount = 4;
+constexpr std::size_t kAsteroidsPerWaveIncrement = 2;
+constexpr std::size_t kShipExplosionShardCount = 15;
+constexpr std::size_t kShipExplosionGlowCount = 4;
+constexpr std::size_t kShipExplosionSmokeCount = 6;
+
 struct Triangle {
     std::array<Vec2, 3> points{};
 };
@@ -304,10 +320,10 @@ GameState::GameState() {
     effectParticles_.reserve(flameConfig_.maxParticles);
     lasers_.reserve(64);
     particleRenderData_.reserve(flameConfig_.maxParticles);
-    initialize_asteroids();
+    spawn_wave();
 }
 
-void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
+void GameState::process_ship_input(float deltaTimeSeconds, const InputState& inputState) {
     float turnInput = 0.0f;
     if (inputState.rotateLeft) {
         turnInput += 1.0f;
@@ -360,20 +376,83 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
 
     shipState_.position += shipState_.velocity * deltaTimeSeconds;
     wrap_position(shipState_.position);
-    update_asteroids(deltaTimeSeconds);
-    update_lasers(deltaTimeSeconds);
+}
+
+void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
     update_effect_particles(deltaTimeSeconds);
-    resolve_laser_asteroid_hits();
+    update_asteroids(deltaTimeSeconds);
+
+    switch (phase_) {
+    case GamePhase::Playing:
+        process_ship_input(deltaTimeSeconds, inputState);
+        update_lasers(deltaTimeSeconds);
+        resolve_laser_asteroid_hits();
+        update_ship_collision_state();
+        if (shipColliding_) {
+            begin_death_sequence();
+        }
+        if (phase_ == GamePhase::Playing && asteroids_.empty() && lasers_.empty()) {
+            phaseTimer_ = kWaveTransitionSeconds;
+            phase_ = GamePhase::WaveTransition;
+        }
+        break;
+
+    case GamePhase::Invulnerable:
+        process_ship_input(deltaTimeSeconds, inputState);
+        update_lasers(deltaTimeSeconds);
+        resolve_laser_asteroid_hits();
+        invulnerabilityTimer_ -= deltaTimeSeconds;
+        if (invulnerabilityTimer_ <= 0.0f) {
+            phase_ = GamePhase::Playing;
+        }
+        if (asteroids_.empty() && lasers_.empty()) {
+            phaseTimer_ = kWaveTransitionSeconds;
+            phase_ = GamePhase::WaveTransition;
+        }
+        break;
+
+    case GamePhase::Dying:
+        update_lasers(deltaTimeSeconds);
+        phaseTimer_ -= deltaTimeSeconds;
+        if (phaseTimer_ <= 0.0f) {
+            if (lives_ > 0) {
+                phase_ = GamePhase::Respawning;
+            } else {
+                phase_ = GamePhase::GameOver;
+            }
+        }
+        break;
+
+    case GamePhase::Respawning:
+        update_lasers(deltaTimeSeconds);
+        if (is_center_safe_for_respawn()) {
+            shipState_.position = {0.0f, 0.0f};
+            shipState_.velocity = {0.0f, 0.0f};
+            shipState_.headingRadians = std::numbers::pi_v<float> * 0.5f;
+            shipState_.angularVelocityRadiansPerSecond = 0.0f;
+            invulnerabilityTimer_ = kInvulnerabilitySeconds;
+            phase_ = GamePhase::Invulnerable;
+        }
+        break;
+
+    case GamePhase::WaveTransition:
+        update_lasers(deltaTimeSeconds);
+        phaseTimer_ -= deltaTimeSeconds;
+        if (phaseTimer_ <= 0.0f) {
+            spawn_wave();
+            phase_ = GamePhase::Playing;
+        }
+        break;
+
+    case GamePhase::GameOver:
+        if (inputState.restartPressed) {
+            reset();
+        }
+        break;
+    }
+
     rebuild_asteroid_render_data();
     rebuild_particle_render_data();
-    update_ship_collision_state();
-    if (shipColliding_) {
-        shipState_.position = {0.0f, 0.0f};
-        shipState_.velocity = {0.0f, 0.0f};
-        shipState_.angularVelocityRadiansPerSecond = 0.0f;
-        shipColliding_ = false;
-        collidingAsteroidIndex_.reset();
-    }
 }
 
 const ShipState& GameState::ship() const {
@@ -394,6 +473,175 @@ std::span<const EffectParticleRenderData> GameState::particles() const {
 
 std::span<const AsteroidRenderData> GameState::asteroids() const {
     return asteroidRenderData_;
+}
+
+HudState GameState::hud_state() const {
+    HudState hud;
+    hud.score = score_;
+    hud.lives = lives_;
+    hud.wave = wave_;
+    hud.phase = phase_;
+    hud.shipVisible = (phase_ == GamePhase::Playing || phase_ == GamePhase::Invulnerable || phase_ == GamePhase::WaveTransition);
+    hud.shipFlashing = (phase_ == GamePhase::Invulnerable);
+    return hud;
+}
+
+void GameState::reset() {
+    shipState_.position = {0.0f, 0.0f};
+    shipState_.velocity = {0.0f, 0.0f};
+    shipState_.headingRadians = std::numbers::pi_v<float> * 0.5f;
+    shipState_.angularVelocityRadiansPerSecond = 0.0f;
+    asteroids_.clear();
+    asteroidRenderData_.clear();
+    effectParticles_.clear();
+    lasers_.clear();
+    particleRenderData_.clear();
+    emissionAccumulator_ = 0.0f;
+    rngState_ = asteroidConfig_.randomSeed;
+    shipColliding_ = false;
+    collidingAsteroidIndex_.reset();
+    phase_ = GamePhase::Playing;
+    score_ = 0;
+    lives_ = kInitialLives;
+    wave_ = 0;
+    phaseTimer_ = 0.0f;
+    invulnerabilityTimer_ = 0.0f;
+    extraLifeAwarded_ = false;
+    spawn_wave();
+}
+
+std::uint32_t GameState::score_for_asteroid(AsteroidSizeClass sizeClass) const {
+    switch (sizeClass) {
+    case AsteroidSizeClass::Large: return kScoreLarge;
+    case AsteroidSizeClass::Medium: return kScoreMedium;
+    case AsteroidSizeClass::Small: return kScoreSmall;
+    }
+    return 0;
+}
+
+void GameState::award_score(std::uint32_t points) {
+    const std::uint32_t previousScore = score_;
+    score_ += points;
+    if (!extraLifeAwarded_ && previousScore < kExtraLifeThreshold && score_ >= kExtraLifeThreshold) {
+        lives_++;
+        extraLifeAwarded_ = true;
+    }
+}
+
+void GameState::begin_death_sequence() {
+    emit_ship_explosion_particles();
+    lives_--;
+    phaseTimer_ = kDeathAnimationSeconds;
+    shipColliding_ = false;
+    collidingAsteroidIndex_.reset();
+    phase_ = GamePhase::Dying;
+}
+
+void GameState::emit_ship_explosion_particles() {
+    const Vec2 origin = shipState_.position;
+
+    for (std::size_t index = 0; index < kShipExplosionShardCount; ++index) {
+        EffectParticle shard{};
+        const float emissionAngle = random_range(0.0f, kTau);
+        shard.position = origin;
+        shard.velocity =
+            shipState_.velocity * 0.25f +
+            forward_from_angle(emissionAngle) *
+            random_range(12.0f, 55.0f);
+        shard.startColor = {0.75f, 0.75f, 0.80f};
+        shard.midColor = {0.50f, 0.35f, 0.25f};
+        shard.endColor = {0.10f, 0.08f, 0.06f};
+        shard.ageSeconds = 0.0f;
+        shard.lifetimeSeconds = random_range(0.15f, 0.45f);
+        shard.size = random_range(0.4f, 1.2f);
+        shard.alpha = 0.8f;
+        shard.rotationRadians = random_range(0.0f, kTau);
+        shard.aspectRatio = random_range(0.7f, 1.3f);
+        shard.glowScale = 2.5f;
+        shard.glowIntensity = 0.3f;
+        shard.bloomIntensity = 0.6f;
+        shard.lightIntensity = 0.2f;
+        shard.fadeAlphaOverLife = true;
+        shard.scaleDownOverLife = true;
+        shard.shape = ParticleShape::Square;
+        shard.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        shard.renderLayer = ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(shard)) {
+            break;
+        }
+    }
+
+    for (std::size_t index = 0; index < kShipExplosionGlowCount; ++index) {
+        EffectParticle glow{};
+        const float emissionAngle = random_range(0.0f, kTau);
+        glow.position = origin;
+        glow.velocity =
+            shipState_.velocity * 0.2f +
+            forward_from_angle(emissionAngle) *
+            random_range(20.0f, 45.0f);
+        glow.startColor = {1.0f, 0.95f, 0.9f};
+        glow.midColor = {1.0f, 0.5f, 0.2f};
+        glow.endColor = {0.6f, 0.1f, 0.05f};
+        glow.ageSeconds = 0.0f;
+        glow.lifetimeSeconds = random_range(0.12f, 0.32f);
+        glow.size = random_range(1.5f, 3.0f);
+        glow.alpha = 0.95f;
+        glow.rotationRadians = emissionAngle;
+        glow.aspectRatio = random_range(0.9f, 1.1f);
+        glow.glowScale = 5.0f;
+        glow.glowIntensity = 1.8f;
+        glow.bloomIntensity = 3.5f;
+        glow.lightIntensity = 0.7f;
+        glow.fadeAlphaOverLife = true;
+        glow.scaleDownOverLife = true;
+        glow.shape = ParticleShape::Square;
+        glow.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        glow.renderLayer = ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(glow)) {
+            break;
+        }
+    }
+
+    for (std::size_t index = 0; index < kShipExplosionSmokeCount; ++index) {
+        EffectParticle smoke{};
+        const float emissionAngle = random_range(0.0f, kTau);
+        smoke.position = origin;
+        smoke.velocity =
+            shipState_.velocity * 0.3f +
+            forward_from_angle(emissionAngle) *
+            random_range(6.0f, 20.0f);
+        smoke.startColor = {0.5f, 0.4f, 0.35f};
+        smoke.midColor = {0.25f, 0.2f, 0.18f};
+        smoke.endColor = {0.05f, 0.05f, 0.05f};
+        smoke.ageSeconds = 0.0f;
+        smoke.lifetimeSeconds = random_range(0.2f, 0.55f);
+        smoke.size = random_range(0.8f, 2.0f);
+        smoke.alpha = 0.55f;
+        smoke.rotationRadians = random_range(0.0f, kTau);
+        smoke.aspectRatio = 1.0f;
+        smoke.glowScale = 2.0f;
+        smoke.glowIntensity = 0.08f;
+        smoke.bloomIntensity = 0.12f;
+        smoke.lightIntensity = 0.04f;
+        smoke.fadeAlphaOverLife = true;
+        smoke.scaleDownOverLife = true;
+        smoke.shape = ParticleShape::Square;
+        smoke.despawnBehavior = ParticleDespawnBehavior::DestroyOffscreen;
+        smoke.renderLayer = (random_range(0.0f, 1.0f) < 0.5f) ? ParticleRenderLayer::BehindAsteroids : ParticleRenderLayer::Front;
+        if (!try_emit_effect_particle(smoke)) {
+            break;
+        }
+    }
+}
+
+bool GameState::is_center_safe_for_respawn() const {
+    const Vec2 center{0.0f, 0.0f};
+    for (const AsteroidState& asteroid : asteroids_) {
+        if (length(asteroid.position - center) < kRespawnSafeRadius + asteroid.outerRadius) {
+            return false;
+        }
+    }
+    return true;
 }
 
 float GameState::random_range(float minValue, float maxValue) {
@@ -474,14 +722,10 @@ bool GameState::try_emit_effect_particle(const EffectParticle& particle) {
     return true;
 }
 
-void GameState::initialize_asteroids() {
-    asteroids_.clear();
-    asteroidRenderData_.clear();
-    effectParticles_.clear();
-    lasers_.clear();
-    particleRenderData_.clear();
-
-    for (std::size_t index = 0; index < asteroidConfig_.asteroidCount; ++index) {
+void GameState::spawn_wave() {
+    wave_++;
+    const std::size_t count = kInitialWaveAsteroidCount + (wave_ - 1) * kAsteroidsPerWaveIncrement;
+    for (std::size_t index = 0; index < count; ++index) {
         asteroids_.push_back(spawn_asteroid());
     }
 
@@ -1078,6 +1322,7 @@ void GameState::resolve_laser_asteroid_hits() {
         const AsteroidState hitAsteroid = asteroids_[impactEvent->asteroidIndex];
         emit_laser_impact_particles(laser, impactEvent.value());
         emit_asteroid_destruction_particles(hitAsteroid, impactEvent.value());
+        award_score(score_for_asteroid(hitAsteroid.sizeClass));
 
         std::vector<AsteroidState> childAsteroids = split_asteroid(hitAsteroid);
         asteroids_.erase(asteroids_.begin() + static_cast<std::ptrdiff_t>(impactEvent->asteroidIndex));

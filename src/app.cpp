@@ -102,7 +102,7 @@ void App::main_loop() {
 
         const float deltaTimeSeconds = std::min(frameDuration.count(), kMaxDeltaTimeSeconds);
         gameState_.update(deltaTimeSeconds, poll_input());
-        renderer_.render(gameState_.ship(), gameState_.particles(), gameState_.asteroids(), deltaTimeSeconds);
+        renderer_.render(gameState_.ship(), gameState_.particles(), gameState_.asteroids(), gameState_.hud_state(), deltaTimeSeconds);
     }
 }
 
@@ -137,6 +137,10 @@ InputState App::poll_input() {
     inputState.firePressed = fireHeld && !previousFireHeld_;
     previousFireHeld_ = fireHeld;
 
+    const bool restartHeld = glfwGetKey(window_, GLFW_KEY_ENTER) == GLFW_PRESS;
+    inputState.restartPressed = restartHeld && !previousRestartHeld_;
+    previousRestartHeld_ = restartHeld;
+
     return inputState;
 }
 
@@ -151,9 +155,11 @@ void App::set_mouse_capture(bool focused) {
         hasPreviousMousePosition_ = true;
         pendingMouseDeltaX_ = 0.0f;
         previousFireHeld_ = false;
+        previousRestartHeld_ = false;
     } else {
         hasPreviousMousePosition_ = false;
         pendingMouseDeltaX_ = 0.0f;
         previousFireHeld_ = false;
+        previousRestartHeld_ = false;
     }
 }

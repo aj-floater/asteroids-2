@@ -15,6 +15,25 @@ struct InputState {
     float mouseTurnDelta = 0.0f;
     bool thrustForward = false;
     bool firePressed = false;
+    bool restartPressed = false;
+};
+
+enum class GamePhase : std::uint32_t {
+    Playing = 0,
+    Dying = 1,
+    Respawning = 2,
+    Invulnerable = 3,
+    GameOver = 4,
+    WaveTransition = 5,
+};
+
+struct HudState {
+    std::uint32_t score = 0;
+    std::uint32_t lives = 0;
+    std::uint32_t wave = 0;
+    GamePhase phase = GamePhase::Playing;
+    bool shipVisible = true;
+    bool shipFlashing = false;
 };
 
 struct ColorRgb {
@@ -260,6 +279,8 @@ public:
     std::optional<std::size_t> collidingAsteroidIndex() const;
     std::span<const EffectParticleRenderData> particles() const;
     std::span<const AsteroidRenderData> asteroids() const;
+    HudState hud_state() const;
+    void reset();
 
 private:
     friend struct GameStateTestAccess;
@@ -286,7 +307,6 @@ private:
     EffectParticleRenderData render_data_from_effect_particle(const EffectParticle& particle) const;
     EffectParticleRenderData render_data_from_laser(const LaserState& laser) const;
     bool try_emit_effect_particle(const EffectParticle& particle);
-    void initialize_asteroids();
     AsteroidState spawn_asteroid();
     std::vector<AsteroidState> split_asteroid(const AsteroidState& asteroid);
     std::optional<AsteroidSizeClass> next_size_class(AsteroidSizeClass sizeClass) const;
@@ -307,6 +327,13 @@ private:
     void update_ship_collision_state();
     void emit_thrust_particles(float deltaTimeSeconds);
     void emit_laser_shot();
+    void process_ship_input(float deltaTimeSeconds, const InputState& inputState);
+    std::uint32_t score_for_asteroid(AsteroidSizeClass sizeClass) const;
+    void award_score(std::uint32_t points);
+    void begin_death_sequence();
+    void emit_ship_explosion_particles();
+    bool is_center_safe_for_respawn() const;
+    void spawn_wave();
     void update_lasers(float deltaTimeSeconds);
     void update_asteroids(float deltaTimeSeconds);
     void update_effect_particles(float deltaTimeSeconds);
@@ -328,4 +355,11 @@ private:
     std::uint32_t rngState_ = 0;
     bool shipColliding_ = false;
     std::optional<std::size_t> collidingAsteroidIndex_{};
+    GamePhase phase_ = GamePhase::Playing;
+    std::uint32_t score_ = 0;
+    std::uint32_t lives_ = 3;
+    std::uint32_t wave_ = 0;
+    float phaseTimer_ = 0.0f;
+    float invulnerabilityTimer_ = 0.0f;
+    bool extraLifeAwarded_ = false;
 };

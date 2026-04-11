@@ -150,6 +150,24 @@ add_custom_command(
   VERBATIM
 )
 
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.vert.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_VERT_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hud.vert"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.vert.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hud.vert"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hud.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/hud.frag"
+  VERBATIM
+)
+
 add_custom_target(asteroids_shaders ALL
   DEPENDS
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.vert.spv"
@@ -165,6 +183,8 @@ add_custom_target(asteroids_shaders ALL
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/fullscreen.vert.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/blur.frag.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/composite.frag.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.vert.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.frag.spv"
 )
 
 add_executable(asteroids

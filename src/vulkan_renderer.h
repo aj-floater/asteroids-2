@@ -18,6 +18,7 @@ public:
         const ShipState& shipState,
         std::span<const EffectParticleRenderData> particles,
         std::span<const AsteroidRenderData> asteroids,
+        const HudState& hudState,
         float deltaTimeSeconds
     );
     void handle_resize();
@@ -81,6 +82,14 @@ private:
         static std::array<VkVertexInputAttributeDescription, 3> attribute_descriptions();
     };
 
+    struct HudVertex {
+        float position[2];
+        float color[4];
+
+        static VkVertexInputBindingDescription binding_description();
+        static std::array<VkVertexInputAttributeDescription, 2> attribute_descriptions();
+    };
+
     struct OffscreenTarget {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -107,6 +116,8 @@ private:
     void create_star_buffer();
     void create_particle_buffer();
     void create_asteroid_buffer();
+    void create_hud_buffer();
+    void update_hud_buffer(const HudState& hudState);
     void create_command_buffers();
     void create_sync_objects();
 
@@ -126,7 +137,8 @@ private:
         uint32_t imageIndex,
         const ShipState& shipState,
         std::span<const EffectParticleRenderData> particles,
-        std::span<const AsteroidRenderData> asteroids
+        std::span<const AsteroidRenderData> asteroids,
+        const HudState& hudState
     );
 
     QueueFamilyIndices find_queue_families(VkPhysicalDevice device) const;
@@ -190,6 +202,8 @@ private:
     VkPipeline blurPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline compositePipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout hudPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline hudPipeline_ = VK_NULL_HANDLE;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
@@ -211,6 +225,12 @@ private:
     void* asteroidBufferMapped_ = nullptr;
     std::size_t asteroidVertexCount_ = 0;
     std::size_t maxAsteroidVertexCount_ = 1024;
+
+    VkBuffer hudBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory hudBufferMemory_ = VK_NULL_HANDLE;
+    void* hudBufferMapped_ = nullptr;
+    std::size_t hudVertexCount_ = 0;
+    static constexpr std::size_t kMaxHudVertices = 2048;
 
     float elapsedTimeSeconds_ = 0.0f;
 
