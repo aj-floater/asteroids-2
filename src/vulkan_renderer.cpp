@@ -953,7 +953,7 @@ void VulkanRenderer::create_pipelines() {
         colorBlending.pAttachments = attachments.data();
 
         VkPushConstantRange pushConstantRange{};
-        pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pushConstantRange.size = sizeof(StarPushConstants);
 
         VkPipelineLayoutCreateInfo layoutInfo{};
@@ -1015,7 +1015,7 @@ void VulkanRenderer::create_pipelines() {
 
         VkPushConstantRange pushConstantRange{};
         pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        pushConstantRange.size = sizeof(ShipPushConstants);
+        pushConstantRange.size = sizeof(AsteroidPushConstants);
 
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1682,13 +1682,36 @@ void VulkanRenderer::create_command_pool() {
 }
 
 void VulkanRenderer::create_starfield() {
+    const FixedAspectViewportLayout viewportLayout =
+        compute_fixed_aspect_viewport_layout(
+            static_cast<int>(swapchainExtent_.width),
+            static_cast<int>(swapchainExtent_.height)
+        );
+    const Vec2 backgroundHalfExtents = compute_background_half_extents(
+        viewportLayout,
+        GameState::kWorldHalfWidth,
+        GameState::kWorldHalfHeight
+    );
+    const float defaultArea =
+        (GameState::kWorldHalfWidth * 2.0f) *
+        (GameState::kWorldHalfHeight * 2.0f);
+    const float backgroundArea =
+        (backgroundHalfExtents.x * 2.0f) *
+        (backgroundHalfExtents.y * 2.0f);
+    const std::size_t desiredStarCount = static_cast<std::size_t>(std::lround(
+        240.0f * (backgroundArea / defaultArea)
+    ));
+
     std::vector<StarVertex> upload;
     upload.reserve(maxStarCount_);
 
     std::uint32_t rng = kStarRandomSeed;
-    for (std::size_t index = 0; index < maxStarCount_; ++index) {
-        const float x = -GameState::kWorldHalfWidth + next_random(rng) * GameState::kWorldHalfWidth * 2.0f;
-        const float y = -GameState::kWorldHalfHeight + next_random(rng) * GameState::kWorldHalfHeight * 2.0f;
+    const std::size_t starCountTarget = std::clamp<std::size_t>(desiredStarCount, 1, maxStarCount_);
+    for (std::size_t index = 0; index < starCountTarget; ++index) {
+        const float x =
+            -backgroundHalfExtents.x + next_random(rng) * backgroundHalfExtents.x * 2.0f;
+        const float y =
+            -backgroundHalfExtents.y + next_random(rng) * backgroundHalfExtents.y * 2.0f;
         const float warmCoolMix = next_random(rng);
         const float size = 0.12f + next_random(rng) * 0.42f;
         const float baseBrightness = 0.35f + next_random(rng) * 0.5f;
@@ -2012,6 +2035,19 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         }
     };
 
+    auto add_number_centered = [&](std::uint32_t number, float centerX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        add_number_left_aligned(
+            number,
+            centerX - measure_number_width(number, scale) * 0.5f,
+            topY,
+            scale,
+            color,
+            alpha,
+            emissiveStrength,
+            sceneAlphaScale
+        );
+    };
+
     auto add_score_delta_popup = [&](std::uint32_t deltaValue, float rightX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
         const float plusWidth = 0.72f * scale;
         const float plusGap = 0.18f * scale;
@@ -2036,6 +2072,159 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
             emissiveStrength,
             sceneAlphaScale
         );
+    };
+
+    auto add_level_label = [&](float centerX, float centerY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        constexpr float stroke = 0.18f;
+        constexpr char text[] = "LEVEL";
+        const float spacing = 0.34f * scale;
+        const float totalWidth = 5.0f * scale + 4.0f * spacing;
+        float x = centerX - totalWidth * 0.5f;
+        const float y = centerY - 0.9f * scale;
+
+        auto lr = [&](float x0, float y0, float x1, float y1) {
+            add_rect(
+                x + x0 * scale,
+                y + y0 * scale,
+                x + x1 * scale,
+                y + y1 * scale,
+                color,
+                alpha,
+                emissiveStrength,
+                sceneAlphaScale
+            );
+        };
+
+        for (const char* p = text; *p != '\0'; ++p) {
+            const char ch = *p;
+            switch (ch) {
+            case 'L':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(stroke, 0.0f, 1.0f, stroke);
+                break;
+            case 'E':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(stroke, 1.8f - stroke, 1.0f, 1.8f);
+                lr(stroke, 0.9f - stroke * 0.5f, 0.8f, 0.9f + stroke * 0.5f);
+                lr(stroke, 0.0f, 1.0f, stroke);
+                break;
+            case 'V':
+                lr(0.0f, 0.9f, stroke, 1.8f);
+                lr(1.0f - stroke, 0.9f, 1.0f, 1.8f);
+                lr(stroke, 0.3f, stroke * 2.0f, 0.9f + stroke);
+                lr(1.0f - stroke * 2.0f, 0.3f, 1.0f - stroke, 0.9f + stroke);
+                lr(stroke * 2.0f, 0.0f, 1.0f - stroke * 2.0f, stroke);
+                break;
+            default:
+                break;
+            }
+            x += scale + spacing;
+        }
+    };
+
+    auto add_game_over_menu_text = [&](const char* text, float centerX, float centerY, float scale, const ColorRgb& textColor, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        constexpr float stroke = 0.18f;
+        const float spacing = kGameOverMenuButtonLetterSpacing;
+        const float textWidth = measure_game_over_menu_text(text, scale, spacing);
+        float x = centerX - textWidth * 0.5f;
+        const float y = centerY - (1.8f * scale) * 0.5f;
+        auto lr = [&](float xStart, float yStart, float xEnd, float yEnd) {
+            add_rect(
+                x + xStart * scale,
+                y + yStart * scale,
+                x + xEnd * scale,
+                y + yEnd * scale,
+                textColor,
+                alpha,
+                emissiveStrength,
+                sceneAlphaScale
+            );
+        };
+
+        for (const char* p = text; *p != '\0'; ++p) {
+            float letterWidth = game_over_menu_letter_width(*p);
+            switch (*p) {
+            case 'R':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(stroke, 1.8f - stroke, 1.0f - stroke, 1.8f);
+                lr(1.0f - stroke, 0.9f, 1.0f, 1.8f - stroke);
+                lr(stroke, 0.9f - stroke * 0.5f, 1.0f - stroke, 0.9f + stroke * 0.5f);
+                lr(0.5f, 0.0f, 0.5f + stroke, 0.9f - stroke * 0.5f);
+                lr(0.5f + stroke, 0.0f, 1.0f, stroke);
+                break;
+            case 'E':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(stroke, 1.8f - stroke, 1.0f, 1.8f);
+                lr(stroke, 0.9f - stroke * 0.5f, 0.8f, 0.9f + stroke * 0.5f);
+                lr(stroke, 0.0f, 1.0f, stroke);
+                break;
+            case 'S':
+                lr(stroke, 1.8f - stroke, 1.0f, 1.8f);
+                lr(0.0f, 0.9f + stroke * 0.5f, stroke, 1.8f - stroke);
+                lr(stroke, 0.9f - stroke * 0.5f, 1.0f - stroke, 0.9f + stroke * 0.5f);
+                lr(1.0f - stroke, stroke, 1.0f, 0.9f - stroke * 0.5f);
+                lr(0.0f, 0.0f, 1.0f - stroke, stroke);
+                break;
+            case 'T':
+                lr(0.0f, 1.8f - stroke, 1.0f, 1.8f);
+                lr(0.5f - stroke * 0.5f, 0.0f, 0.5f + stroke * 0.5f, 1.8f - stroke);
+                break;
+            case 'A':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(1.0f - stroke, 0.0f, 1.0f, 1.8f);
+                lr(stroke, 1.8f - stroke, 1.0f - stroke, 1.8f);
+                lr(stroke, 0.9f - stroke * 0.5f, 1.0f - stroke, 0.9f + stroke * 0.5f);
+                break;
+            case 'M':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(1.2f - stroke, 0.0f, 1.2f, 1.8f);
+                lr(stroke, 1.8f - stroke, 0.6f, 1.8f);
+                lr(0.6f, 1.8f - stroke, 1.2f - stroke, 1.8f);
+                lr(0.6f - stroke * 0.5f, 0.9f, 0.6f + stroke * 0.5f, 1.8f - stroke);
+                break;
+            case 'I':
+                lr(0.35f - stroke * 0.5f, 0.0f, 0.35f + stroke * 0.5f, 1.8f);
+                lr(0.0f, 1.8f - stroke, 0.7f, 1.8f);
+                lr(0.0f, 0.0f, 0.7f, stroke);
+                break;
+            case 'N':
+                lr(0.0f, 0.0f, stroke, 1.8f);
+                lr(1.0f - stroke, 0.0f, 1.0f, 1.8f);
+                lr(stroke, 1.8f - stroke, 1.0f - stroke, 1.8f);
+                break;
+            case 'U':
+                lr(0.0f, stroke, stroke, 1.8f);
+                lr(1.0f - stroke, stroke, 1.0f, 1.8f);
+                lr(stroke, 0.0f, 1.0f - stroke, stroke);
+                break;
+            case ' ':
+                break;
+            default:
+                break;
+            }
+            x += letterWidth * scale + spacing;
+        }
+    };
+
+    auto add_game_over_selection_brackets = [&](float centerX, float centerY, float textWidth, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        const float bracketGap = scale * 0.85f;
+        const float bracketThickness = scale * 0.20f;
+        const float bracketStub = scale * 0.50f;
+        const float y0 = centerY - (1.8f * scale) * 0.5f - scale * 0.12f;
+        const float y1 = centerY + (1.8f * scale) * 0.5f + scale * 0.12f;
+
+        const float leftInner = centerX - textWidth * 0.5f - bracketGap;
+        const float leftOuter = leftInner - bracketThickness;
+        const float rightOuter = centerX + textWidth * 0.5f + bracketGap + bracketThickness;
+        const float rightInner = rightOuter - bracketThickness;
+
+        add_rect(leftOuter, y0, leftInner, y1, color, alpha, emissiveStrength, sceneAlphaScale);
+        add_rect(leftOuter, y1 - bracketThickness, leftOuter + bracketStub, y1, color, alpha, emissiveStrength, sceneAlphaScale);
+        add_rect(leftOuter, y0, leftOuter + bracketStub, y0 + bracketThickness, color, alpha, emissiveStrength, sceneAlphaScale);
+
+        add_rect(rightInner, y0, rightOuter, y1, color, alpha, emissiveStrength, sceneAlphaScale);
+        add_rect(rightOuter - bracketStub, y1 - bracketThickness, rightOuter, y1, color, alpha, emissiveStrength, sceneAlphaScale);
+        add_rect(rightOuter - bracketStub, y0, rightOuter, y0 + bracketThickness, color, alpha, emissiveStrength, sceneAlphaScale);
     };
 
     {
@@ -2156,6 +2345,22 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         }
     }
 
+    if (hudState.waveAnnouncementTimer > 0.0f && hudState.phase != GamePhase::GameOver) {
+        const float normalizedRemaining = std::clamp(
+            hudState.waveAnnouncementTimer / GameState::kWaveAnnouncementSeconds,
+            0.0f,
+            1.0f
+        );
+        const float alpha = 0.94f * std::min(1.0f, normalizedRemaining * 3.0f);
+        const float labelScale = 0.032f;
+        const float numberScale = 0.050f;
+        const ColorRgb levelColor{0.82f, 0.84f, 0.92f};
+        const float numberTopY = -0.03f + dh * numberScale * 0.5f;
+
+        add_level_label(0.0f, 0.10f, labelScale, levelColor, alpha, 0.0f);
+        add_number_centered(hudState.wave, 0.0f, numberTopY, numberScale, levelColor, alpha, 0.0f);
+    }
+
     if (hudState.phase == GamePhase::GameOver) {
         const float scale = 0.048f;
         const float letterSpacing = 1.3f * scale;
@@ -2230,6 +2435,41 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         letter_rect(1.0f - lw, 0.9f, 1.0f, 1.8f - lw);
         letter_rect(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
         letter_rect(1.0f - lw, 0.0f, 1.0f, 0.9f - lw * 0.5f);
+
+        if (hudState.restartPromptVisible) {
+            constexpr ColorRgb selectedColor{0.96f, 0.77f, 0.18f};
+            constexpr ColorRgb idleColor{0.55f, 0.56f, 0.62f};
+            for (std::size_t buttonIndex = 0; buttonIndex < kGameOverMenuButtons.size(); ++buttonIndex) {
+                const bool selected = hudState.gameOverMenuSelectedIndex == buttonIndex;
+                const ColorRgb color = selected ? selectedColor : idleColor;
+                const float emission = selected ? 3.5f : 1.2f;
+                const float textWidth = measure_game_over_menu_text(
+                    kGameOverMenuButtons[buttonIndex].label,
+                    kGameOverMenuButtonScale,
+                    kGameOverMenuButtonLetterSpacing
+                );
+                if (selected) {
+                    add_game_over_selection_brackets(
+                        0.0f,
+                        kGameOverMenuButtons[buttonIndex].centerY,
+                        textWidth,
+                        kGameOverMenuButtonScale,
+                        color,
+                        0.98f,
+                        emission
+                    );
+                }
+                add_game_over_menu_text(
+                    kGameOverMenuButtons[buttonIndex].label,
+                    0.0f,
+                    kGameOverMenuButtons[buttonIndex].centerY,
+                    kGameOverMenuButtonScale,
+                    color,
+                    0.98f,
+                    emission
+                );
+            }
+        }
     }
 
     hudVertexCount_ = std::min(vertices.size(), kMaxHudVertices);
@@ -2300,12 +2540,35 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
 
         float letterWidth = 1.0f;
 
+        // 7-segment helpers for digits (reused per digit case)
+        auto seg_T  = [&]{ lr(lw, 1.8f - lw, 1.0f - lw, 1.8f); };
+        auto seg_TL = [&]{ lr(0.0f, 0.9f + lw * 0.5f, lw, 1.8f - lw); };
+        auto seg_TR = [&]{ lr(1.0f - lw, 0.9f + lw * 0.5f, 1.0f, 1.8f - lw); };
+        auto seg_M  = [&]{ lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f); };
+        auto seg_BL = [&]{ lr(0.0f, lw, lw, 0.9f - lw * 0.5f); };
+        auto seg_BR = [&]{ lr(1.0f - lw, lw, 1.0f, 0.9f - lw * 0.5f); };
+        auto seg_B  = [&]{ lr(lw, 0.0f, 1.0f - lw, lw); };
+
         switch (ch) {
             case 'A':
                 lr(0.0f, 0.0f, lw, 1.8f);
                 lr(1.0f - lw, 0.0f, 1.0f, 1.8f);
                 lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
                 lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                break;
+            case 'B':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 1.8f - lw, 0.8f, 1.8f);
+                lr(0.8f, 0.9f + lw * 0.5f, 0.8f + lw, 1.8f - lw);
+                lr(lw, 0.9f - lw * 0.5f, 0.8f + lw, 0.9f + lw * 0.5f);
+                lr(0.8f, lw, 0.8f + lw, 0.9f - lw * 0.5f);
+                lr(lw, 0.0f, 0.8f, lw);
+                letterWidth = 0.8f + lw;
+                break;
+            case 'C':
+                lr(lw, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.0f, lw, lw, 1.8f - lw);
+                lr(lw, 0.0f, 1.0f, lw);
                 break;
             case 'D':
                 lr(0.0f, 0.0f, lw, 1.8f);
@@ -2321,6 +2584,11 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
                 lr(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f);
                 lr(lw, 0.0f, 1.0f, lw);
                 break;
+            case 'F':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 1.8f - lw, 1.0f, 1.8f);
+                lr(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f);
+                break;
             case 'G':
                 lr(lw, 1.8f - lw, 1.0f, 1.8f);
                 lr(0.0f, lw, lw, 1.8f - lw);
@@ -2328,10 +2596,32 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
                 lr(1.0f - lw, 0.0f, 1.0f, 0.9f + lw * 0.5f);
                 lr(0.5f, 0.9f - lw * 0.5f, 1.0f, 0.9f + lw * 0.5f);
                 break;
+            case 'H':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(1.0f - lw, 0.0f, 1.0f, 1.8f);
+                lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                break;
             case 'I':
                 lr(0.5f - lw * 0.5f, 0.0f, 0.5f + lw * 0.5f, 1.8f);
                 lr(0.0f, 1.8f - lw, 1.0f, 1.8f);
                 lr(0.0f, 0.0f, 1.0f, lw);
+                break;
+            case 'J':
+                lr(1.0f - lw, lw, 1.0f, 1.8f);
+                lr(0.0f, 0.0f, 1.0f - lw, lw);
+                lr(0.0f, lw, lw, 0.5f);
+                break;
+            case 'K':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 0.9f - lw * 0.5f, 0.55f, 0.9f + lw * 0.5f);
+                lr(0.55f, 0.9f + lw * 0.5f, 0.55f + lw, 1.8f - lw);
+                lr(0.55f + lw, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.55f, lw, 0.55f + lw, 0.9f - lw * 0.5f);
+                lr(0.55f + lw, 0.0f, 1.0f, lw);
+                break;
+            case 'L':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 0.0f, 1.0f, lw);
                 break;
             case 'M':
                 lr(0.0f, 0.0f, lw, 1.8f);
@@ -2390,6 +2680,67 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
                 lr(1.0f - lw, lw, 1.0f, 1.8f);
                 lr(lw, 0.0f, 1.0f - lw, lw);
                 break;
+            case 'V':
+                // Wide-top, narrow-bottom stepped shape
+                lr(0.0f, 0.9f, lw, 1.8f);                          // upper-left stem
+                lr(1.0f - lw, 0.9f, 1.0f, 1.8f);                   // upper-right stem
+                lr(lw, 0.3f, lw * 2.0f, 0.9f + lw);                // lower-left inner
+                lr(1.0f - lw * 2.0f, 0.3f, 1.0f - lw, 0.9f + lw); // lower-right inner
+                lr(lw * 2.0f, 0.0f, 1.0f - lw * 2.0f, lw);        // bottom bar
+                break;
+            case 'W':
+                // Upside-down M
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(1.2f - lw, 0.0f, 1.2f, 1.8f);
+                lr(lw, 0.0f, 0.6f, lw);
+                lr(0.6f, 0.0f, 1.2f - lw, lw);
+                lr(0.6f - lw * 0.5f, lw, 0.6f + lw * 0.5f, 0.9f);
+                letterWidth = 1.2f;
+                break;
+            case 'X':
+                // Four corner stubs + inner steps + center
+                lr(0.0f, 1.8f - lw * 2.5f, lw, 1.8f);
+                lr(1.0f - lw, 1.8f - lw * 2.5f, 1.0f, 1.8f);
+                lr(0.0f, 0.0f, lw, lw * 2.5f);
+                lr(1.0f - lw, 0.0f, 1.0f, lw * 2.5f);
+                lr(lw, 1.2f, lw * 2.0f, 1.8f - lw * 2.5f);
+                lr(1.0f - lw * 2.0f, 1.2f, 1.0f - lw, 1.8f - lw * 2.5f);
+                lr(lw, lw * 2.5f, lw * 2.0f, 0.6f);
+                lr(1.0f - lw * 2.0f, lw * 2.5f, 1.0f - lw, 0.6f);
+                lr(lw * 2.0f, 0.6f, 1.0f - lw * 2.0f, 1.2f);
+                break;
+            case 'Y':
+                lr(0.0f, 0.9f, lw, 1.8f);
+                lr(1.0f - lw, 0.9f, 1.0f, 1.8f);
+                lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                lr(0.5f - lw * 0.5f, 0.0f, 0.5f + lw * 0.5f, 0.9f - lw * 0.5f);
+                break;
+            case 'Z':
+                lr(0.0f, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.0f, 0.0f, 1.0f, lw);
+                lr(0.0f, 1.1f, lw, 1.8f - lw);
+                lr(0.0f, 1.1f - lw, 1.0f, 1.1f);
+                lr(1.0f - lw, lw, 1.0f, 0.7f);
+                lr(0.0f, 0.7f - lw, 1.0f, 0.7f);
+                break;
+            case '0': seg_T(); seg_TL(); seg_TR(); seg_BL(); seg_BR(); seg_B(); break;
+            case '1':
+                lr(0.35f, 0.0f, 0.65f, 1.8f);
+                letterWidth = 0.65f;
+                break;
+            case '2': seg_T(); seg_TR(); seg_M(); seg_BL(); seg_B(); break;
+            case '3': seg_T(); seg_TR(); seg_M(); seg_BR(); seg_B(); break;
+            case '4': seg_TL(); seg_M(); seg_TR(); seg_BR(); break;
+            case '5': seg_T(); seg_TL(); seg_M(); seg_BR(); seg_B(); break;
+            case '6': seg_T(); seg_TL(); seg_M(); seg_BL(); seg_BR(); seg_B(); break;
+            case '7': seg_T(); seg_TR(); seg_BR(); break;
+            case '8': seg_T(); seg_TL(); seg_TR(); seg_M(); seg_BL(); seg_BR(); seg_B(); break;
+            case '9': seg_T(); seg_TL(); seg_TR(); seg_M(); seg_BR(); seg_B(); break;
+            case ':':
+                lr(0.2f, 0.35f, 0.8f, 0.65f);
+                lr(0.2f, 1.15f, 0.8f, 1.45f);
+                letterWidth = 0.7f;
+                break;
             case ' ':
                 letterWidth = 0.5f;
                 break;
@@ -2406,9 +2757,13 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
             // Use same letter widths as draw_letter
             float letterWidth = 1.0f;
             switch (*p) {
+                case 'B': letterWidth = 0.8f + lw; break;
                 case 'D': letterWidth = 0.75f + lw; break;
                 case 'M': letterWidth = 1.2f; break;
                 case 'Q': letterWidth = 1.1f; break;
+                case 'W': letterWidth = 1.2f; break;
+                case '1': letterWidth = 0.65f; break;
+                case ':': letterWidth = 0.7f; break;
                 case ' ': letterWidth = 0.5f; break;
                 default: break;
             }
@@ -2426,24 +2781,121 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
         }
     };
 
+    auto draw_selection_brackets = [&](float centerX, float baselineY, float textWidth, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+        constexpr float kGlyphHeight = 1.8f;
+
+        const float bracketGap       = scale * 0.85f;
+        const float bracketThickness = scale * 0.20f;
+        const float bracketStub      = scale * 0.50f;
+        const float y0               = baselineY - scale * 0.12f;
+        const float y1               = baselineY + kGlyphHeight * scale + scale * 0.12f;
+
+        const float leftInner  = centerX - textWidth * 0.5f - bracketGap;
+        const float leftOuter  = leftInner - bracketThickness;
+        const float rightOuter = centerX + textWidth * 0.5f + bracketGap + bracketThickness;
+        const float rightInner = rightOuter - bracketThickness;
+
+        add_rect(leftOuter, y0, leftInner, y1, color, alpha, emissiveStrength);
+        add_rect(leftOuter, y1 - bracketThickness, leftOuter + bracketStub, y1, color, alpha, emissiveStrength);
+        add_rect(leftOuter, y0, leftOuter + bracketStub, y0 + bracketThickness, color, alpha, emissiveStrength);
+
+        add_rect(rightInner, y0, rightOuter, y1, color, alpha, emissiveStrength);
+        add_rect(rightOuter - bracketStub, y1 - bracketThickness, rightOuter, y1, color, alpha, emissiveStrength);
+        add_rect(rightOuter - bracketStub, y0, rightOuter, y0 + bracketThickness, color, alpha, emissiveStrength);
+    };
+
+    // -----------------------------------------------------------------------
+    // Title
+    // -----------------------------------------------------------------------
+    const MenuLayout::OverlayLayout layout = MenuLayout::compute_overlay_layout(
+        menuOverlay.lines,
+        menuOverlay.placement
+    );
+
     if (menuOverlay.title != nullptr) {
-        const ColorRgb titleColor{0.86f, 0.88f, 0.96f};
-        const float titleScale = 0.055f;
-        const float titleSpacing = 0.3f * titleScale;
-        const float titleEmission = 3.0f;
-        draw_text(menuOverlay.title, 0.0f, 0.25f, titleScale, titleSpacing, titleColor, 0.98f, titleEmission);
+        constexpr ColorRgb titleColor{0.86f, 0.88f, 0.96f};
+        constexpr float titleScale   = MenuLayout::kTitleScale;
+        const     float titleSpacing = 0.3f * titleScale;
+        draw_text(menuOverlay.title, 0.0f, layout.titleY, titleScale, titleSpacing, titleColor, 0.98f, 3.0f);
     }
 
-    for (std::size_t i = 0; i < menuOverlay.items.size(); ++i) {
-        const bool selected = (i == menuOverlay.selectedIndex);
-        const ColorRgb itemColor = selected
-            ? ColorRgb{0.96f, 0.77f, 0.18f}
-            : ColorRgb{0.55f, 0.56f, 0.62f};
-        const float itemEmission = selected ? 3.5f : 1.2f;
-        const float itemScale = 0.032f;
-        const float itemSpacing = 0.3f * itemScale;
-        const float itemY = -0.05f - static_cast<float>(i) * 0.14f;
-        draw_text(menuOverlay.items[i], 0.0f, itemY, itemScale, itemSpacing, itemColor, 0.98f, itemEmission);
+    // -----------------------------------------------------------------------
+    // Lines
+    // -----------------------------------------------------------------------
+    // selectedIndex counts only Selectable lines.
+    std::size_t selectablesSeen = 0;
+    float y = layout.linesStartY;
+
+    for (const MenuLine& line : menuOverlay.lines) {
+        // Extra gap before this line (e.g. visual section break)
+        y -= line.extraGapBefore;
+
+        switch (line.type) {
+        case MenuLineType::Selectable: {
+            const bool isSelected = (selectablesSeen == menuOverlay.selectedIndex);
+            ++selectablesSeen;
+            ColorRgb color;
+            float emission;
+            if (isSelected) {
+                color    = line.accented ? ColorRgb{1.0f, 0.88f, 0.30f} : ColorRgb{0.96f, 0.77f, 0.18f};
+                emission = 3.5f;
+            } else if (line.accented) {
+                color    = ColorRgb{0.70f, 0.74f, 0.84f};
+                emission = 1.05f;
+            } else {
+                color    = ColorRgb{0.55f, 0.56f, 0.62f};
+                emission = 1.2f;
+            }
+            if (line.label != nullptr) {
+                constexpr float scale   = MenuLayout::kItemScale;
+                const     float spacing = 0.3f * scale;
+                const     float textWidth = measure_text(line.label, scale, spacing);
+                if (isSelected) {
+                    draw_selection_brackets(0.0f, y, textWidth, scale, color, 0.98f, emission);
+                }
+                draw_text(line.label, 0.0f, y, scale, spacing, color, 0.98f, emission);
+            }
+            y -= MenuLayout::kSelectableStep;
+            break;
+        }
+        case MenuLineType::Info: {
+            if (line.label != nullptr) {
+                constexpr ColorRgb color{0.55f, 0.56f, 0.62f};
+                constexpr float scale   = MenuLayout::kInfoScale;
+                const     float spacing = 0.3f * scale;
+                draw_text(line.label, 0.0f, y, scale, spacing, color, 0.75f, 0.9f);
+            }
+            y -= MenuLayout::kInfoStep;
+            break;
+        }
+        case MenuLineType::Stat: {
+            // Label left-aligned at -0.38, value right-aligned at +0.38
+            constexpr float scale    = MenuLayout::kStatLabelScale;
+            const     float spacing  = 0.3f * scale;
+            constexpr ColorRgb labelColor{0.50f, 0.52f, 0.58f};
+            constexpr ColorRgb valueColor{0.80f, 0.82f, 0.90f};
+            if (line.label != nullptr) {
+                const float tw = measure_text(line.label, scale, spacing);
+                draw_text(line.label, -0.38f + tw * 0.5f, y, scale, spacing, labelColor, 0.85f, 0.9f);
+            }
+            if (line.value != nullptr) {
+                const float tw = measure_text(line.value, scale, spacing);
+                draw_text(line.value, 0.38f - tw * 0.5f, y, scale, spacing, valueColor, 0.95f, 1.8f);
+            }
+            y -= MenuLayout::kStatStep;
+            break;
+        }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bottom status line
+    // -----------------------------------------------------------------------
+    if (menuOverlay.bottomStatus != nullptr) {
+        constexpr ColorRgb color{0.46f, 0.48f, 0.54f};
+        constexpr float scale   = MenuLayout::kBottomStatusScale;
+        const     float spacing = 0.3f * scale;
+        draw_text(menuOverlay.bottomStatus, 0.0f, MenuLayout::kBottomStatusY, scale, spacing, color, 0.7f, 0.8f);
     }
 
     menuVertexCount_ = std::min(vertices.size(), kMaxMenuVertices);
@@ -2626,6 +3078,7 @@ void VulkanRenderer::recreate_swapchain() {
     create_pipelines();
     create_framebuffers();
     update_descriptor_sets();
+    create_starfield();
 }
 
 void VulkanRenderer::update_particle_buffer(std::span<const EffectParticleRenderData> particles) {
@@ -2837,17 +3290,46 @@ void VulkanRenderer::record_command_buffer(
         throw std::runtime_error("Failed to begin recording command buffer.");
     }
 
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(swapchainExtent_.width);
-    viewport.height = static_cast<float>(swapchainExtent_.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
+    const FixedAspectViewportLayout viewportLayout =
+        compute_fixed_aspect_viewport_layout(
+            static_cast<int>(swapchainExtent_.width),
+            static_cast<int>(swapchainExtent_.height)
+        );
+    const Vec2 backgroundHalfExtents = compute_background_half_extents(
+        viewportLayout,
+        GameState::kWorldHalfWidth,
+        GameState::kWorldHalfHeight
+    );
 
-    VkRect2D scissor{};
-    scissor.offset = {0, 0};
-    scissor.extent = swapchainExtent_;
+    VkViewport fullViewport{};
+    fullViewport.x = 0.0f;
+    fullViewport.y = 0.0f;
+    fullViewport.width = static_cast<float>(swapchainExtent_.width);
+    fullViewport.height = static_cast<float>(swapchainExtent_.height);
+    fullViewport.minDepth = 0.0f;
+    fullViewport.maxDepth = 1.0f;
+
+    VkRect2D fullScissor{};
+    fullScissor.offset = {0, 0};
+    fullScissor.extent = swapchainExtent_;
+
+    VkViewport playableViewport{};
+    playableViewport.x = static_cast<float>(viewportLayout.playableOffsetX);
+    playableViewport.y = static_cast<float>(viewportLayout.playableOffsetY);
+    playableViewport.width = static_cast<float>(viewportLayout.playableWidth);
+    playableViewport.height = static_cast<float>(viewportLayout.playableHeight);
+    playableViewport.minDepth = 0.0f;
+    playableViewport.maxDepth = 1.0f;
+
+    VkRect2D playableScissor{};
+    playableScissor.offset = {
+        viewportLayout.playableOffsetX,
+        viewportLayout.playableOffsetY,
+    };
+    playableScissor.extent = {
+        static_cast<std::uint32_t>(viewportLayout.playableWidth),
+        static_cast<std::uint32_t>(viewportLayout.playableHeight),
+    };
 
     const bool skipLightPasses = (renderMode == RenderMode::StartMenu);
 
@@ -2858,13 +3340,13 @@ void VulkanRenderer::record_command_buffer(
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = lightRenderPass_;
         renderPassInfo.framebuffer = lightTarget_.framebuffer;
-        renderPassInfo.renderArea = scissor;
+        renderPassInfo.renderArea = fullScissor;
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdSetViewport(commandBuffer, 0, 1, &playableViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &playableScissor);
 
         if (!skipLightPasses && !particles.empty()) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
@@ -2884,13 +3366,13 @@ void VulkanRenderer::record_command_buffer(
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = lightRenderPass_;
         renderPassInfo.framebuffer = asteroidLightTarget_.framebuffer;
-        renderPassInfo.renderArea = scissor;
+        renderPassInfo.renderArea = fullScissor;
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdSetViewport(commandBuffer, 0, 1, &playableViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &playableScissor);
 
         if (!skipLightPasses) {
             const std::size_t foregroundParticleCount = particles.size() - backgroundParticleCount_;
@@ -2921,13 +3403,13 @@ void VulkanRenderer::record_command_buffer(
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = sceneRenderPass_;
         renderPassInfo.framebuffer = sceneTarget_.framebuffer;
-        renderPassInfo.renderArea = scissor;
+        renderPassInfo.renderArea = fullScissor;
         renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
         renderPassInfo.pClearValues = clearValues.data();
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdSetViewport(commandBuffer, 0, 1, &fullViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
 
         if (starCount_ > 0) {
             VkBuffer vertexBuffers[] = {starBuffer_};
@@ -2937,10 +3419,12 @@ void VulkanRenderer::record_command_buffer(
 
             StarPushConstants starPushConstants{};
             starPushConstants.elapsedTimeSeconds = elapsedTimeSeconds_;
+            starPushConstants.backgroundHalfWidth = backgroundHalfExtents.x;
+            starPushConstants.backgroundHalfHeight = backgroundHalfExtents.y;
             vkCmdPushConstants(
                 commandBuffer,
                 starPipelineLayout_,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0,
                 sizeof(StarPushConstants),
                 &starPushConstants
@@ -2948,6 +3432,9 @@ void VulkanRenderer::record_command_buffer(
 
             vkCmdDraw(commandBuffer, 4, static_cast<uint32_t>(starCount_), 0, 0);
         }
+
+        vkCmdSetViewport(commandBuffer, 0, 1, &playableViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &playableScissor);
 
         if (renderMode != RenderMode::StartMenu && !particles.empty() && backgroundParticleCount_ > 0) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
@@ -2973,15 +3460,19 @@ void VulkanRenderer::record_command_buffer(
             );
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-            ShipPushConstants pushConstants{};
+            AsteroidPushConstants pushConstants{};
             pushConstants.worldHalfExtents[0] = GameState::kWorldHalfWidth;
             pushConstants.worldHalfExtents[1] = GameState::kWorldHalfHeight;
+            pushConstants.playableUvRect[0] = viewportLayout.playableUvMinX;
+            pushConstants.playableUvRect[1] = viewportLayout.playableUvMinY;
+            pushConstants.playableUvRect[2] = viewportLayout.playableUvMaxX;
+            pushConstants.playableUvRect[3] = viewportLayout.playableUvMaxY;
             vkCmdPushConstants(
                 commandBuffer,
                 asteroidPipelineLayout_,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
-                sizeof(ShipPushConstants),
+                sizeof(AsteroidPushConstants),
                 &pushConstants
             );
 
@@ -3072,13 +3563,13 @@ void VulkanRenderer::record_command_buffer(
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = postProcessRenderPass_;
         renderPassInfo.framebuffer = outputTarget.framebuffer;
-        renderPassInfo.renderArea = scissor;
+        renderPassInfo.renderArea = fullScissor;
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdSetViewport(commandBuffer, 0, 1, &fullViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipeline_);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, blurPipelineLayout_, 0, 1, &inputSet, 0, nullptr);
 
@@ -3106,13 +3597,13 @@ void VulkanRenderer::record_command_buffer(
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = compositeRenderPass_;
         renderPassInfo.framebuffer = swapchainFramebuffers_[imageIndex];
-        renderPassInfo.renderArea = scissor;
+        renderPassInfo.renderArea = fullScissor;
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdSetViewport(commandBuffer, 0, 1, &fullViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline_);
         vkCmdBindDescriptorSets(
             commandBuffer,
@@ -3125,6 +3616,10 @@ void VulkanRenderer::record_command_buffer(
             nullptr
         );
         CompositePushConstants compositePC{};
+        compositePC.playableUvMinX = viewportLayout.playableUvMinX;
+        compositePC.playableUvMinY = viewportLayout.playableUvMinY;
+        compositePC.playableUvMaxX = viewportLayout.playableUvMaxX;
+        compositePC.playableUvMaxY = viewportLayout.playableUvMaxY;
         if (renderMode == RenderMode::Paused) {
             compositePC.sceneMix = 0.0f;
             compositePC.bloomStrength = 1.0f;
@@ -3143,6 +3638,8 @@ void VulkanRenderer::record_command_buffer(
         if (menuVertexCount_ > 0) {
             VkBuffer vertexBuffers[] = {menuBuffer_};
             VkDeviceSize offsets[] = {0};
+            vkCmdSetViewport(commandBuffer, 0, 1, &playableViewport);
+            vkCmdSetScissor(commandBuffer, 0, 1, &playableScissor);
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, menuHudPipeline_);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
             vkCmdDraw(commandBuffer, static_cast<uint32_t>(menuVertexCount_), 1, 0, 0);

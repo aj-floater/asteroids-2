@@ -38,7 +38,15 @@ constexpr float kCollisionWarningAttackSeconds = 0.05f;
 constexpr float kCollisionWarningReleaseSeconds = 0.24f;
 constexpr float kCollisionWarningMotionCutoffHz = 6.5f;
 constexpr float kCollisionWarningNoiseHighpassCutoffHz = 95.0f;
-constexpr float kCollisionWarningMasterGain = 0.16f;
+constexpr float kCollisionWarningMasterGain = 0.18f;
+constexpr float kRespawnHumAttackSeconds = 0.08f;
+constexpr float kRespawnHumReleaseSeconds = 0.22f;
+constexpr float kRespawnHumNoiseCutoffHz = 180.0f;
+constexpr float kRespawnHumMasterGain = 0.09f;
+constexpr float kLaserMotionAttackSeconds = 0.012f;
+constexpr float kLaserMotionReleaseSeconds = 0.09f;
+constexpr float kLaserMotionNoiseHighpassCutoffHz = 420.0f;
+constexpr float kLaserMotionMasterGain = 0.075f;
 
 float lowpass_alpha(float cutoffHz) {
     const float dt = 1.0f / static_cast<float>(ProceduralAudioMixer::kSampleRate);
@@ -124,6 +132,16 @@ void ProceduralAudioMixer::submit_audio_frame(const AudioFrameState& audioFrameS
         ? std::clamp(audioFrameState.collisionWarningIntensity, 0.0f, 1.0f)
         : 0.0f;
     collisionWarningTargetLevel_.store(collisionWarningLevel, std::memory_order_release);
+    const float respawnHumLevel =
+        audioFrameState.respawnHumActive
+        ? std::clamp(audioFrameState.respawnHumIntensity, 0.0f, 1.0f)
+        : 0.0f;
+    respawnHumTargetLevel_.store(respawnHumLevel, std::memory_order_release);
+    const float laserMotionLevel =
+        audioFrameState.laserMotionActive
+        ? std::clamp(audioFrameState.laserMotionIntensity, 0.0f, 1.0f)
+        : 0.0f;
+    laserMotionTargetLevel_.store(laserMotionLevel, std::memory_order_release);
 
     for (std::size_t eventIndex = 0; eventIndex < audioFrameState.eventCount; ++eventIndex) {
         const std::uint32_t writeIndex = queuedEventWriteIndex_.load(std::memory_order_relaxed);
@@ -137,13 +155,20 @@ void ProceduralAudioMixer::submit_audio_frame(const AudioFrameState& audioFrameS
     }
 }
 
+void ProceduralAudioMixer::set_sfx_volume(float volume) {
+    sfxVolume_.store(std::clamp(volume, 0.0f, 1.0f), std::memory_order_release);
+}
+
 void ProceduralAudioMixer::mix(float* outputFrames, std::uint32_t frameCount) {
     std::fill_n(outputFrames, static_cast<std::size_t>(frameCount) * kChannelCount, 0.0f);
 
     drain_pending_events();
 
+    const float sfxVolume = sfxVolume_.load(std::memory_order_acquire);
     const float targetThrustLevel = thrustTargetLevel_.load(std::memory_order_acquire);
     const float targetCollisionWarningLevel = collisionWarningTargetLevel_.load(std::memory_order_acquire);
+    const float targetRespawnHumLevel = respawnHumTargetLevel_.load(std::memory_order_acquire);
+    const float targetLaserMotionLevel = laserMotionTargetLevel_.load(std::memory_order_acquire);
     const bool thrustActive = targetThrustLevel > 0.5f;
     if (thrustActive && !thrustWasActive_) {
         thrustIgnitionLevel_ = 1.0f;
@@ -159,6 +184,12 @@ void ProceduralAudioMixer::mix(float* outputFrames, std::uint32_t frameCount) {
     const float warningReleaseCoefficient = envelope_coefficient(kCollisionWarningReleaseSeconds);
     const float warningMotionAlpha = lowpass_alpha(kCollisionWarningMotionCutoffHz);
     const float warningNoiseHighpassAlpha = highpass_alpha(kCollisionWarningNoiseHighpassCutoffHz);
+    const float respawnHumAttackCoefficient = envelope_coefficient(kRespawnHumAttackSeconds);
+    const float respawnHumReleaseCoefficient = envelope_coefficient(kRespawnHumReleaseSeconds);
+    const float respawnHumNoiseAlpha = lowpass_alpha(kRespawnHumNoiseCutoffHz);
+    const float laserMotionAttackCoefficient = envelope_coefficient(kLaserMotionAttackSeconds);
+    const float laserMotionReleaseCoefficient = envelope_coefficient(kLaserMotionReleaseSeconds);
+    const float laserMotionNoiseHighpassAlpha = highpass_alpha(kLaserMotionNoiseHighpassCutoffHz);
 
     for (std::uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
         const float gainCoefficient = targetThrustLevel > thrustGain_ ? attackCoefficient : releaseCoefficient;
@@ -271,9 +302,9 @@ void ProceduralAudioMixer::mix(float* outputFrames, std::uint32_t frameCount) {
 
             const float cinematicPressure = std::clamp(collisionWarningMotionState_, -1.0f, 1.0f);
             const float baseFrequencyHz =
-                94.0f +
-                intensity * 34.0f +
-                cinematicPressure * 4.0f;
+                108.0f +
+                intensity * 38.0f +
+                cinematicPressure * 5.0f;
             const float carrierPhase = advance_phase(
                 collisionWarningCarrierPhase_,
                 std::max(baseFrequencyHz, 50.0f)
@@ -312,8 +343,97 @@ void ProceduralAudioMixer::mix(float* outputFrames, std::uint32_t frameCount) {
                 tone;
         }
 
-        float leftMix = thrustSample * 0.78f + collisionWarningSample;
-        float rightMix = thrustSample * 0.78f + collisionWarningSample;
+        const float respawnHumGainCoefficient =
+            targetRespawnHumLevel > respawnHumGain_
+            ? respawnHumAttackCoefficient
+            : respawnHumReleaseCoefficient;
+        respawnHumGain_ =
+            targetRespawnHumLevel +
+            (respawnHumGain_ - targetRespawnHumLevel) * respawnHumGainCoefficient;
+
+        float respawnHumSample = 0.0f;
+        if (respawnHumGain_ > 0.0003f) {
+            const float intensity = std::clamp(respawnHumGain_, 0.0f, 1.0f);
+            const float humNoise = next_noise_sample();
+            respawnHumNoiseState_ += respawnHumNoiseAlpha * (humNoise - respawnHumNoiseState_);
+
+            const float modPhase = advance_phase(respawnHumModPhase_, 0.42f + intensity * 0.18f);
+            const float modLfo = 0.5f + 0.5f * std::sin(modPhase);
+            const float carrierHz = 132.0f + modLfo * 16.0f;
+            const float secondaryHz = carrierHz * 1.58f + 12.0f;
+            const float carrierPhase = advance_phase(respawnHumCarrierPhase_, carrierHz);
+            const float secondaryPhase = advance_phase(respawnHumSecondaryPhase_, secondaryHz);
+
+            const float body =
+                std::sin(carrierPhase) * 0.62f +
+                std::sin(secondaryPhase) * 0.22f +
+                std::sin(carrierPhase * 0.5f + 0.4f) * 0.12f;
+            const float air = respawnHumNoiseState_ * (0.035f + intensity * 0.025f);
+            respawnHumSample =
+                intensity *
+                kRespawnHumMasterGain *
+                std::tanh(body * 0.95f + air);
+        }
+
+        const float laserMotionGainCoefficient =
+            targetLaserMotionLevel > laserMotionGain_
+            ? laserMotionAttackCoefficient
+            : laserMotionReleaseCoefficient;
+        laserMotionGain_ =
+            targetLaserMotionLevel +
+            (laserMotionGain_ - targetLaserMotionLevel) * laserMotionGainCoefficient;
+
+        float laserMotionSample = 0.0f;
+        if (laserMotionGain_ > 0.0003f) {
+            const float motionNoise = next_noise_sample();
+            laserMotionHighpassState_ =
+                laserMotionNoiseHighpassAlpha *
+                (laserMotionHighpassState_ + motionNoise - laserMotionNoiseInput_);
+            laserMotionNoiseInput_ = motionNoise;
+
+            const float intensity = std::clamp(laserMotionGain_, 0.0f, 1.0f);
+            const float motionPhase = advance_phase(
+                laserMotionModPhase_,
+                std::lerp(2.6f, 5.8f, intensity)
+            );
+            const float driftPhase = advance_phase(
+                laserMotionDriftPhase_,
+                std::lerp(0.22f, 0.46f, intensity)
+            );
+            const float motionLfo = 0.5f + 0.5f * std::sin(motionPhase);
+            const float driftLfo = std::sin(driftPhase);
+            const float carrierHz =
+                520.0f +
+                intensity * 180.0f +
+                motionLfo * 85.0f +
+                driftLfo * 18.0f;
+            const float secondaryHz =
+                carrierHz * (1.92f + intensity * 0.08f) +
+                24.0f * driftLfo;
+            const float bandCutoffHz =
+                1380.0f +
+                intensity * 620.0f +
+                motionLfo * 420.0f;
+            laserMotionBandState_ +=
+                lowpass_alpha(std::max(320.0f, bandCutoffHz)) *
+                (laserMotionHighpassState_ - laserMotionBandState_);
+
+            const float carrierPhase = advance_phase(laserMotionCarrierPhase_, carrierHz);
+            const float secondaryPhase = advance_phase(laserMotionSecondaryPhase_, secondaryHz);
+            const float shimmer =
+                std::sin(carrierPhase) * 0.34f +
+                std::sin(secondaryPhase) * 0.18f +
+                std::sin(carrierPhase * 2.0f + 0.14f) * 0.08f;
+            const float grit =
+                laserMotionBandState_ * (0.18f + intensity * 0.18f);
+            laserMotionSample =
+                intensity *
+                kLaserMotionMasterGain *
+                std::tanh((shimmer + grit) * (0.92f + intensity * 0.22f));
+        }
+
+        float leftMix = thrustSample * 0.78f + collisionWarningSample + respawnHumSample + laserMotionSample;
+        float rightMix = thrustSample * 0.78f + collisionWarningSample + respawnHumSample + laserMotionSample;
 
         for (SynthVoice& voice : voices_) {
             if (!voice.active) {
@@ -330,6 +450,9 @@ void ProceduralAudioMixer::mix(float* outputFrames, std::uint32_t frameCount) {
             leftMix += voiceSample * leftPan;
             rightMix += voiceSample * rightPan;
         }
+
+        leftMix *= sfxVolume;
+        rightMix *= sfxVolume;
 
         const std::size_t outputIndex = static_cast<std::size_t>(frameIndex) * kChannelCount;
         outputFrames[outputIndex + 0] = std::tanh(leftMix);
@@ -400,6 +523,11 @@ void ProceduralAudioMixer::spawn_voice_for_event(const AudioEvent& event) {
         voice.durationSeconds = 0.72f;
         voice.gain *= 0.92f;
         break;
+    case AudioEventType::ShipRespawned:
+        voice.kind = SynthVoiceKind::ShipRespawned;
+        voice.durationSeconds = 0.2f;
+        voice.gain *= 0.42f;
+        break;
     case AudioEventType::ExtraLife:
         voice.kind = SynthVoiceKind::ExtraLife;
         voice.durationSeconds = 0.34f;
@@ -440,6 +568,12 @@ void ProceduralAudioMixer::spawn_voice_for_event(const AudioEvent& event) {
         voice.durationSeconds = 0.16f;
         voice.gain *= 0.34f;
         break;
+    case AudioEventType::ScoreComboTick:
+        voice.kind = SynthVoiceKind::ScoreComboTick;
+        voice.durationSeconds = 0.07f + 0.01f * std::min(voice.scalar - 1.0f, 2.5f);
+        voice.gain *= 0.24f + 0.03f * std::min(voice.scalar - 1.0f, 2.5f);
+        voice.pan = (next_uniform_sample() * 2.0f - 1.0f) * 0.08f;
+        break;
     case AudioEventType::None:
         voice.active = false;
         break;
@@ -477,26 +611,56 @@ float ProceduralAudioMixer::render_voice_sample(SynthVoice& voice) {
 
     switch (voice.kind) {
     case SynthVoiceKind::LaserFired: {
-        const float attack = attack_envelope(voice.ageSeconds, 0.002f);
-        const float env = attack * decay_envelope(normalizedAge, 8.5f);
-        const float frequency = lerp_frequency(1540.0f, 620.0f, normalizedAge * normalizedAge);
-        const float phase = advance_phase(voice.phaseA, frequency);
-        const float wave = squareish_wave(phase);
-        const float noise = next_noise_sample() * 0.12f;
-        sample = voice.gain * env * (wave * 0.92f + noise);
+        const float attack = attack_envelope(voice.ageSeconds, 0.0014f);
+        const float transientEnv = attack * decay_envelope(normalizedAge, 18.0f);
+        const float bodyEnv = attack * decay_envelope(normalizedAge, 6.2f);
+        const float tailEnv = delayed_decay_envelope(normalizedAge, 0.18f, 7.5f);
+        const float baseFrequency =
+            std::lerp(2150.0f, 2550.0f, voice.variationA);
+        const float carrierFrequency =
+            lerp_frequency(baseFrequency, 760.0f, normalizedAge * normalizedAge);
+        const float ringFrequency =
+            lerp_frequency(baseFrequency * 1.46f, 980.0f, normalizedAge);
+        const float phaseA = advance_phase(voice.phaseA, carrierFrequency);
+        const float phaseB = advance_phase(voice.phaseB, ringFrequency);
+        const float rawNoise = next_noise_sample();
+        const float hpAlpha = highpass_alpha(1280.0f);
+        voice.filterStateB = hpAlpha * (voice.filterStateB + rawNoise - voice.previousInput);
+        voice.previousInput = rawNoise;
+        voice.filterStateA += lowpass_alpha(2400.0f) * (voice.filterStateB - voice.filterStateA);
+        const float shot =
+            squareish_wave(phaseA) * 0.7f +
+            std::sin(phaseB) * 0.18f +
+            (std::sin(phaseA) * std::sin(phaseB)) * 0.14f;
+        const float air = voice.filterStateA * 0.52f;
+        const float tail =
+            std::sin(phaseA * 0.58f + 0.24f) * 0.2f +
+            voice.filterStateA * 0.12f;
+        sample = voice.gain * std::tanh(
+            transientEnv * (shot * 1.1f + air) +
+            bodyEnv * (shot * 0.82f) +
+            tailEnv * tail * 0.55f
+        );
         break;
     }
 
     case SynthVoiceKind::AsteroidHit: {
-        const float attack = attack_envelope(voice.ageSeconds, 0.0015f);
-        const float env = attack * decay_envelope(normalizedAge, 11.5f);
+        const float attack = attack_envelope(voice.ageSeconds, 0.001f);
+        const float env = attack * decay_envelope(normalizedAge, 13.8f);
         const float rawNoise = next_noise_sample();
-        const float hpAlpha = highpass_alpha(650.0f);
+        const float hpAlpha = highpass_alpha(980.0f);
         voice.filterStateB = hpAlpha * (voice.filterStateB + rawNoise - voice.previousInput);
         voice.previousInput = rawNoise;
-        voice.filterStateA += lowpass_alpha(2200.0f) * (voice.filterStateB - voice.filterStateA);
-        const float phase = advance_phase(voice.phaseA, lerp_frequency(1300.0f, 740.0f, normalizedAge));
-        sample = voice.gain * env * (voice.filterStateA * 0.95f + std::sin(phase) * 0.18f);
+        voice.filterStateA += lowpass_alpha(2650.0f) * (voice.filterStateB - voice.filterStateA);
+        const float phaseA = advance_phase(voice.phaseA, lerp_frequency(1720.0f, 860.0f, normalizedAge));
+        const float phaseB = advance_phase(voice.phaseB, lerp_frequency(2460.0f, 1120.0f, normalizedAge));
+        const float metallic =
+            std::sin(phaseA) * std::sin(phaseB);
+        sample = voice.gain * env * (
+            voice.filterStateA * 0.82f +
+            metallic * 0.22f +
+            std::sin(phaseA) * 0.12f
+        );
         break;
     }
 
@@ -608,6 +772,25 @@ float ProceduralAudioMixer::render_voice_sample(SynthVoice& voice) {
             voice.filterStateB * 0.48f +
             std::sin(phaseA) * 0.25f +
             std::sin(phaseB) * 0.14f
+        );
+        break;
+    }
+
+    case SynthVoiceKind::ShipRespawned: {
+        const float attack = attack_envelope(voice.ageSeconds, 0.002f);
+        const float env = attack * decay_envelope(normalizedAge, 3.4f);
+        const float glide = 1.0f - normalizedAge;
+        const float baseFrequency = std::lerp(640.0f, 980.0f, 1.0f - glide * glide);
+        const float overtoneFrequency = baseFrequency * 1.5f;
+        const float phaseA = advance_phase(voice.phaseA, baseFrequency);
+        const float phaseB = advance_phase(voice.phaseB, overtoneFrequency);
+        const float shimmer = std::sin(phaseA * (1.95f + 0.08f * voice.variationA) + voice.variationB * kTau);
+        voice.filterStateA += lowpass_alpha(std::lerp(1200.0f, 4200.0f, normalizedAge)) * (next_noise_sample() - voice.filterStateA);
+        sample = voice.gain * env * (
+            squareish_wave(phaseA) * 0.46f +
+            std::sin(phaseB) * 0.26f +
+            shimmer * 0.12f +
+            voice.filterStateA * (0.08f + 0.04f * (1.0f - normalizedAge))
         );
         break;
     }
@@ -764,6 +947,33 @@ float ProceduralAudioMixer::render_voice_sample(SynthVoice& voice) {
         );
         break;
     }
+
+    case SynthVoiceKind::ScoreComboTick: {
+        const float comboDepth = std::min(voice.scalar - 1.0f, 2.5f);
+        const float attack = attack_envelope(voice.ageSeconds, 0.0015f);
+        const float env =
+            attack *
+            decay_envelope(normalizedAge, 8.2f) *
+            (0.95f + 0.08f * comboDepth);
+        const float baseFrequency =
+            std::lerp(860.0f, 980.0f, voice.variationA) +
+            comboDepth * 62.0f;
+        const float glide =
+            std::lerp(1.08f + comboDepth * 0.025f, 1.42f + comboDepth * 0.04f, normalizedAge);
+        const float phaseA = advance_phase(voice.phaseA, baseFrequency * glide);
+        const float phaseB = advance_phase(voice.phaseB, baseFrequency * 1.52f * glide);
+        const float sparkle =
+            std::sin(phaseA * 2.0f + 0.18f) * 0.12f +
+            std::sin(phaseB * 2.0f + 0.34f) * 0.06f;
+        sample = voice.gain * env * (
+            squareish_wave(phaseA) * 0.58f +
+            std::sin(phaseA) * 0.12f +
+            std::sin(phaseB) * (0.2f + 0.03f * comboDepth) +
+            sparkle
+        );
+        break;
+    }
+
     }
 
     voice.ageSeconds += 1.0f / static_cast<float>(kSampleRate);
@@ -828,6 +1038,10 @@ void AudioEngine::shutdown() {
     delete impl_;
     impl_ = nullptr;
     initialized_ = false;
+}
+
+void AudioEngine::set_sfx_volume(float volume) {
+    mixer_.set_sfx_volume(volume);
 }
 
 void AudioEngine::submit_audio_frame(const AudioFrameState& audioFrameState) {

@@ -204,6 +204,8 @@ add_executable(asteroids
   src/app.cpp
   src/game_state.cpp
   src/menu_asteroids.cpp
+  src/profile_store.cpp
+  src/settings_store.cpp
   src/vulkan_renderer.cpp
 )
 
@@ -268,4 +270,19 @@ if(BUILD_TESTING)
   endif()
 
   add_test(NAME game_state_tests COMMAND game_state_tests)
+
+  add_executable(settings_store_tests
+    tests/settings_store_tests.cpp
+    src/settings_store.cpp
+  )
+
+  target_include_directories(settings_store_tests PRIVATE src)
+
+  if(MSVC)
+    target_compile_options(settings_store_tests PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(settings_store_tests PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+
+  add_test(NAME settings_store_tests COMMAND settings_store_tests)
 endif()

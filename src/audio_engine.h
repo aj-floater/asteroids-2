@@ -13,6 +13,7 @@ public:
     static constexpr std::uint32_t kChannelCount = 2;
 
     void submit_audio_frame(const AudioFrameState& audioFrameState);
+    void set_sfx_volume(float volume);
     void mix(float* outputFrames, std::uint32_t frameCount);
 
 private:
@@ -26,6 +27,7 @@ private:
         AsteroidDestroyedMedium,
         AsteroidDestroyedSmall,
         ShipExploded,
+        ShipRespawned,
         ExtraLife,
         WaveStarted,
         ScoreMilestone5k,
@@ -34,6 +36,7 @@ private:
         MenuHover,
         MenuSelect,
         PauseMenuOpened,
+        ScoreComboTick,
     };
 
     struct SynthVoice {
@@ -64,8 +67,11 @@ private:
     std::array<SynthVoice, kMaxVoices> voices_{};
     std::atomic<std::uint32_t> queuedEventWriteIndex_{0};
     std::atomic<std::uint32_t> queuedEventReadIndex_{0};
+    std::atomic<float> sfxVolume_{1.0f};
     std::atomic<float> thrustTargetLevel_{0.0f};
     std::atomic<float> collisionWarningTargetLevel_{0.0f};
+    std::atomic<float> respawnHumTargetLevel_{0.0f};
+    std::atomic<float> laserMotionTargetLevel_{0.0f};
     float thrustGain_ = 0.0f;
     float thrustLowRoarState_ = 0.0f;
     float thrustMidRoarState_ = 0.0f;
@@ -88,6 +94,19 @@ private:
     float collisionWarningCarrierPhase_ = 0.0f;
     float collisionWarningCarrierSecondaryPhase_ = 0.0f;
     float collisionWarningSubPhase_ = 0.0f;
+    float respawnHumGain_ = 0.0f;
+    float respawnHumNoiseState_ = 0.0f;
+    float respawnHumCarrierPhase_ = 0.0f;
+    float respawnHumSecondaryPhase_ = 0.0f;
+    float respawnHumModPhase_ = 0.0f;
+    float laserMotionGain_ = 0.0f;
+    float laserMotionBandState_ = 0.0f;
+    float laserMotionHighpassState_ = 0.0f;
+    float laserMotionNoiseInput_ = 0.0f;
+    float laserMotionCarrierPhase_ = 0.0f;
+    float laserMotionSecondaryPhase_ = 0.0f;
+    float laserMotionModPhase_ = 0.0f;
+    float laserMotionDriftPhase_ = 0.0f;
     bool thrustWasActive_ = false;
     std::uint32_t noiseState_ = 0xA341316Cu;
     std::uint32_t voiceRandomState_ = 0x13579BDFu;
@@ -97,6 +116,7 @@ class AudioEngine {
 public:
     void initialize();
     void shutdown();
+    void set_sfx_volume(float volume);
     void submit_audio_frame(const AudioFrameState& audioFrameState);
     void render_audio(float* outputFrames, std::uint32_t frameCount);
 

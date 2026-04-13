@@ -27,7 +27,6 @@ constexpr float kGlowSpreadRadians = 0.95f;
 constexpr float kGlowAlpha = 0.95f;
 
 constexpr float kDeathAnimationSeconds = 1.5f;
-constexpr float kWaveTransitionSeconds = 2.0f;
 constexpr float kInvulnerabilitySeconds = 3.0f;
 constexpr float kInvulnerabilityFlashHz = 8.0f;
 constexpr float kCollisionWarningRange = 60.0f;
@@ -59,6 +58,27 @@ struct Bounds {
     float minY = 0.0f;
     float maxY = 0.0f;
 };
+
+template <typename BoundsLike>
+Vec2 wrap_delta_from_bounds(const BoundsLike& bounds, float halfWidth, float halfHeight) {
+    Vec2 delta{};
+    const float width = bounds.maxX - bounds.minX;
+    const float height = bounds.maxY - bounds.minY;
+
+    if (bounds.minX > halfWidth) {
+        delta.x -= (2.0f * halfWidth) + width;
+    } else if (bounds.maxX < -halfWidth) {
+        delta.x += (2.0f * halfWidth) + width;
+    }
+
+    if (bounds.minY > halfHeight) {
+        delta.y -= (2.0f * halfHeight) + height;
+    } else if (bounds.maxY < -halfHeight) {
+        delta.y += (2.0f * halfHeight) + height;
+    }
+
+    return delta;
+}
 
 constexpr std::array<std::array<Vec2, 3>, 2> kShipLocalTriangles{{
     {{{4.0f, 0.0f}, {-4.0f, 4.0f}, {-2.0f, 0.0f}}},
@@ -169,6 +189,38 @@ Bounds bounds_from_triangles(const std::array<Triangle, 2>& triangles) {
             bounds.minY = std::min(bounds.minY, point.y);
             bounds.maxY = std::max(bounds.maxY, point.y);
         }
+    }
+
+    return bounds;
+}
+
+Bounds bounds_from_rotated_rectangle(
+    const Vec2& center,
+    float rotationRadians,
+    float halfLength,
+    float halfWidth
+) {
+    const std::array<Vec2, 4> localCorners{{
+        { halfLength,  halfWidth},
+        { halfLength, -halfWidth},
+        {-halfLength,  halfWidth},
+        {-halfLength, -halfWidth},
+    }};
+
+    const Vec2 firstPoint = center + rotate_point(localCorners[0], rotationRadians);
+    Bounds bounds{
+        .minX = firstPoint.x,
+        .maxX = firstPoint.x,
+        .minY = firstPoint.y,
+        .maxY = firstPoint.y,
+    };
+
+    for (std::size_t index = 1; index < localCorners.size(); ++index) {
+        const Vec2 point = center + rotate_point(localCorners[index], rotationRadians);
+        bounds.minX = std::min(bounds.minX, point.x);
+        bounds.maxX = std::max(bounds.maxX, point.x);
+        bounds.minY = std::min(bounds.minY, point.y);
+        bounds.maxY = std::max(bounds.maxY, point.y);
     }
 
     return bounds;
@@ -433,11 +485,25 @@ void GameState::process_ship_input(float deltaTimeSeconds, const InputState& inp
     }
 
     shipState_.position += shipState_.velocity * deltaTimeSeconds;
-    wrap_position(shipState_.position);
+    shipState_.position += wrap_delta_from_bounds(
+        bounds_from_triangles(ship_world_triangles(shipState_)),
+        kWorldHalfWidth,
+        kWorldHalfHeight
+    );
 }
 
 void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
     reset_audio_frame_state();
+    if (phase_ != GamePhase::GameOver) {
+        playTimeThisRunSeconds_ += deltaTimeSeconds;
+    }
+
+    waveAnnouncementTimer_ = std::max(0.0f, waveAnnouncementTimer_ - deltaTimeSeconds);
+    if (waveAdvancePending_) {
+        waveAdvanceDelayTimer_ = std::max(0.0f, waveAdvanceDelayTimer_ - deltaTimeSeconds);
+    } else {
+        waveAdvanceDelayTimer_ = 0.0f;
+    }
 
     if (recentScorePopupTimer_ > 0.0f) {
         recentScorePopupTimer_ = std::max(0.0f, recentScorePopupTimer_ - deltaTimeSeconds);
@@ -478,9 +544,12 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
         if (phase_ == GamePhase::Playing) {
             update_collision_warning_state();
         }
-        if (phase_ == GamePhase::Playing && asteroids_.empty() && lasers_.empty()) {
-            phaseTimer_ = kWaveTransitionSeconds;
-            phase_ = GamePhase::WaveTransition;
+        if (phase_ == GamePhase::Playing &&
+            waveAdvancePending_ &&
+            waveAdvanceDelayTimer_ <= 0.0f &&
+            asteroids_.empty() &&
+            lasers_.empty()) {
+            start_next_wave();
         }
         break;
 
@@ -492,9 +561,11 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
         if (invulnerabilityTimer_ <= 0.0f) {
             phase_ = GamePhase::Playing;
         }
-        if (asteroids_.empty() && lasers_.empty()) {
-            phaseTimer_ = kWaveTransitionSeconds;
-            phase_ = GamePhase::WaveTransition;
+        if (waveAdvancePending_ &&
+            waveAdvanceDelayTimer_ <= 0.0f &&
+            asteroids_.empty() &&
+            lasers_.empty()) {
+            start_next_wave();
         }
         break;
 
@@ -506,6 +577,7 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
                 phase_ = GamePhase::Respawning;
             } else {
                 push_audio_event(AudioEventType::GameOver);
+                gameOverTimer_ = 0.0f;
                 phase_ = GamePhase::GameOver;
             }
         }
@@ -519,26 +591,42 @@ void GameState::update(float deltaTimeSeconds, const InputState& inputState) {
             shipState_.headingRadians = std::numbers::pi_v<float> * 0.5f;
             shipState_.angularVelocityRadiansPerSecond = 0.0f;
             invulnerabilityTimer_ = kInvulnerabilitySeconds;
+            push_audio_event(AudioEventType::ShipRespawned);
             phase_ = GamePhase::Invulnerable;
+        } else {
+            audioFrameState_.respawnHumActive = true;
+            audioFrameState_.respawnHumIntensity = 1.0f;
         }
         break;
 
     case GamePhase::WaveTransition:
+        process_ship_input(deltaTimeSeconds, inputState);
         update_lasers(deltaTimeSeconds);
+        resolve_laser_asteroid_hits();
+        update_ship_collision_state();
+        if (shipColliding_) {
+            begin_death_sequence();
+        }
+        if (phase_ == GamePhase::WaveTransition) {
+            update_collision_warning_state();
+        }
         phaseTimer_ -= deltaTimeSeconds;
         if (phaseTimer_ <= 0.0f) {
-            spawn_wave();
             phase_ = GamePhase::Playing;
         }
         break;
 
     case GamePhase::GameOver:
-        if (inputState.restartPressed) {
+        gameOverTimer_ += deltaTimeSeconds;
+        if (inputState.restartPressed && gameOverTimer_ >= kGameOverRestartDelaySeconds) {
             reset();
         }
         break;
     }
 
+    // Laser motion layer is disabled for now; keep the hook in place so we can
+    // restore continuous beam audio without rethreading gameplay state.
+    // update_laser_audio_state();
     rebuild_asteroid_render_data();
     rebuild_particle_render_data();
 }
@@ -567,7 +655,10 @@ HudState GameState::hud_state() const {
     HudState hud;
     hud.score = score_;
     hud.lives = displayedLives_;
-    hud.wave = wave_;
+    hud.wave = (waveAdvancePending_ && waveAnnouncementTimer_ > 0.0f) ? (wave_ + 1) : wave_;
+    hud.waveAnnouncementTimer = waveAnnouncementTimer_;
+    hud.restartPromptVisible = (phase_ == GamePhase::GameOver && gameOverTimer_ >= kGameOverRestartDelaySeconds);
+    hud.gameOverMenuSelectedIndex = 0;
     hud.laserColor = laserConfig_.color;
     hud.scoreFlashEnergy = scoreFlashEnergy_;
     hud.scoreMilestoneColor = scoreMilestoneColor_;
@@ -586,6 +677,15 @@ AudioFrameState GameState::consume_audio_frame() {
     return audioFrameState;
 }
 
+RunSummary GameState::run_summary() const {
+    return RunSummary{
+        .finalScore         = score_,
+        .finalWave          = wave_,
+        .asteroidsDestroyed = asteroidsDestroyedThisRun_,
+        .playTimeSeconds    = playTimeThisRunSeconds_,
+    };
+}
+
 void GameState::reset() {
     shipState_.position = {0.0f, 0.0f};
     shipState_.velocity = {0.0f, 0.0f};
@@ -597,7 +697,6 @@ void GameState::reset() {
     lasers_.clear();
     particleRenderData_.clear();
     emissionAccumulator_ = 0.0f;
-    rngState_ = asteroidConfig_.randomSeed;
     shipColliding_ = false;
     collidingAsteroidIndex_.reset();
     phase_ = GamePhase::Playing;
@@ -615,11 +714,17 @@ void GameState::reset() {
     scoreMilestoneFlashMinimumVisibleEnergy_ = 0.0f;
     recentScorePopupValue_ = 0;
     recentScorePopupTimer_ = 0.0f;
+    waveAnnouncementTimer_ = 0.0f;
+    waveAdvanceDelayTimer_ = 0.0f;
     phaseTimer_ = 0.0f;
     invulnerabilityTimer_ = 0.0f;
+    gameOverTimer_ = 0.0f;
+    waveAdvancePending_ = false;
     extraLifeAwarded_ = false;
     extraLifeRevealPending_ = false;
     extraLifeRevealTimer_ = 0.0f;
+    asteroidsDestroyedThisRun_ = 0;
+    playTimeThisRunSeconds_ = 0.0f;
     spawn_wave();
 }
 
@@ -659,14 +764,20 @@ void GameState::award_score(std::uint32_t points) {
         return;
     }
 
+    const std::uint32_t flashTriggerThreshold = kScoreFeedbackTuning.popup.scoreFlashTriggerThreshold;
     const std::uint32_t previousScore = score_;
     score_ += points;
     recentScorePopupValue_ += points;
     recentScorePopupTimer_ = kScoreFeedbackTuning.popup.lifetimeSeconds;
 
-    if (recentScorePopupValue_ > kScoreFeedbackTuning.popup.scoreFlashTriggerThreshold) {
+    if (recentScorePopupValue_ > flashTriggerThreshold) {
         scoreFlashEnergy_ += kScoreFeedbackTuning.scoreHit.addedEnergy;
         scoreFlashHoldTimer_ = std::max(scoreFlashHoldTimer_, kScoreFeedbackTuning.scoreHit.holdSeconds);
+        const float comboScalar = std::min(
+            3.5f,
+            static_cast<float>(recentScorePopupValue_) / static_cast<float>(flashTriggerThreshold)
+        );
+        push_audio_event(AudioEventType::ScoreComboTick, comboScalar);
     }
 
     const std::uint32_t previousMilestoneBucket = previousScore / kScoreMilestoneStep;
@@ -910,6 +1021,10 @@ void GameState::reset_audio_frame_state() {
     audioFrameState_.thrustActive = false;
     audioFrameState_.collisionWarningActive = false;
     audioFrameState_.collisionWarningIntensity = 0.0f;
+    audioFrameState_.respawnHumActive = false;
+    audioFrameState_.respawnHumIntensity = 0.0f;
+    audioFrameState_.laserMotionActive = false;
+    audioFrameState_.laserMotionIntensity = 0.0f;
     audioFrameState_.eventCount = 0;
 }
 
@@ -927,6 +1042,9 @@ void GameState::push_audio_event(AudioEventType type, float scalar) {
 
 void GameState::spawn_wave() {
     wave_++;
+    waveAdvancePending_ = false;
+    waveAdvanceDelayTimer_ = 0.0f;
+    waveAnnouncementTimer_ = (wave_ > 1) ? kWaveAnnouncementSeconds : 0.0f;
     push_audio_event(AudioEventType::WaveStarted);
     const std::size_t count = kInitialWaveAsteroidCount + (wave_ - 1) * kAsteroidsPerWaveIncrement;
     for (std::size_t index = 0; index < count; ++index) {
@@ -937,11 +1055,21 @@ void GameState::spawn_wave() {
     rebuild_particle_render_data();
 }
 
+void GameState::start_next_wave() {
+    spawn_wave();
+    waveAdvancePending_ = false;
+    waveAdvanceDelayTimer_ = 0.0f;
+    if (phase_ == GamePhase::WaveTransition) {
+        phase_ = GamePhase::Playing;
+        phaseTimer_ = 0.0f;
+    }
+}
+
 AsteroidState GameState::spawn_asteroid() {
     AsteroidState asteroid{};
     asteroid.sizeClass = AsteroidSizeClass::Large;
     asteroid.vertexCount = random_index(asteroidConfig_.minVertexCount, asteroidConfig_.maxVertexCount);
-    const float baseSize = random_range(asteroidConfig_.minSize, asteroidConfig_.maxSize);
+    const float baseSize = random_range(spawn_min_size_for_wave(wave_), asteroidConfig_.maxSize);
     const float angleStep = kTau / static_cast<float>(asteroid.vertexCount);
 
     float maxRadius = 0.0f;
@@ -1009,6 +1137,24 @@ std::optional<AsteroidSizeClass> GameState::next_size_class(AsteroidSizeClass si
     }
 
     return std::nullopt;
+}
+
+float GameState::spawn_min_size_for_wave(std::uint32_t wave) const {
+    const float lateWaveMinSize = asteroidConfig_.minSize;
+    const float earlyWaveMinSize = std::max(lateWaveMinSize, asteroidConfig_.earlyWaveSpawnMinSize);
+    const std::uint32_t rampEndWave = asteroidConfig_.spawnMinSizeRampEndWave;
+
+    if (rampEndWave <= 1 || wave >= rampEndWave) {
+        return lateWaveMinSize;
+    }
+    if (wave <= 1) {
+        return earlyWaveMinSize;
+    }
+
+    const float t =
+        static_cast<float>(wave - 1) /
+        static_cast<float>(rampEndWave - 1);
+    return std::lerp(earlyWaveMinSize, lateWaveMinSize, t);
 }
 
 float GameState::child_scale_for_size_class(AsteroidSizeClass sizeClass) const {
@@ -1224,21 +1370,11 @@ void GameState::rebuild_particle_render_data() {
 }
 
 void GameState::wrap_asteroid(AsteroidState& asteroid) const {
-    const AsteroidBounds bounds = asteroid_bounds(asteroid);
-    const float width = bounds.maxX - bounds.minX;
-    const float height = bounds.maxY - bounds.minY;
-
-    if (bounds.minX > kWorldHalfWidth) {
-        asteroid.position.x -= (2.0f * kWorldHalfWidth) + width;
-    } else if (bounds.maxX < -kWorldHalfWidth) {
-        asteroid.position.x += (2.0f * kWorldHalfWidth) + width;
-    }
-
-    if (bounds.minY > kWorldHalfHeight) {
-        asteroid.position.y -= (2.0f * kWorldHalfHeight) + height;
-    } else if (bounds.maxY < -kWorldHalfHeight) {
-        asteroid.position.y += (2.0f * kWorldHalfHeight) + height;
-    }
+    asteroid.position += wrap_delta_from_bounds(
+        asteroid_bounds(asteroid),
+        kWorldHalfWidth,
+        kWorldHalfHeight
+    );
 }
 
 std::optional<GameState::LaserImpactEvent> GameState::find_laser_impact(const LaserState& laser) const {
@@ -1539,11 +1675,17 @@ void GameState::resolve_laser_asteroid_hits() {
             break;
         }
         award_score(score_for_asteroid(hitAsteroid.sizeClass));
+        ++asteroidsDestroyedThisRun_;
 
         std::vector<AsteroidState> childAsteroids = split_asteroid(hitAsteroid);
         asteroids_.erase(asteroids_.begin() + static_cast<std::ptrdiff_t>(impactEvent->asteroidIndex));
         asteroids_.reserve(asteroids_.size() + childAsteroids.size());
         asteroids_.insert(asteroids_.end(), childAsteroids.begin(), childAsteroids.end());
+        if (asteroids_.empty()) {
+            waveAdvancePending_ = true;
+            waveAdvanceDelayTimer_ = kWaveAdvanceDelaySeconds;
+            waveAnnouncementTimer_ = std::max(waveAnnouncementTimer_, kWaveAnnouncementSeconds);
+        }
     }
 
     lasers_.resize(writeIndex);
@@ -1759,15 +1901,36 @@ void GameState::update_lasers(float deltaTimeSeconds) {
 
         laser.previousPosition = laser.position;
         laser.position += laser.velocity * deltaTimeSeconds;
-        if (is_out_of_bounds(laser.position)) {
-            continue;
-        }
+        const Vec2 wrapDelta = wrap_delta_from_bounds(
+            bounds_from_rotated_rectangle(
+                laser.position,
+                laser.headingRadians,
+                laserConfig_.length * 0.5f,
+                laserConfig_.width * 0.5f
+            ),
+            kWorldHalfWidth,
+            kWorldHalfHeight
+        );
+        laser.position += wrapDelta;
+        laser.previousPosition += wrapDelta;
 
         lasers_[writeIndex] = laser;
         ++writeIndex;
     }
 
     lasers_.resize(writeIndex);
+}
+
+void GameState::update_laser_audio_state() {
+    if (lasers_.empty()) {
+        return;
+    }
+
+    audioFrameState_.laserMotionActive = true;
+    audioFrameState_.laserMotionIntensity = std::min(
+        1.0f,
+        0.46f + 0.22f * static_cast<float>(lasers_.size() - 1)
+    );
 }
 
 void GameState::update_asteroids(float deltaTimeSeconds) {

@@ -4,6 +4,13 @@ layout(location = 0) in vec2 inPosition;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec4 inParams;
 
+layout(push_constant) uniform StarPushConstants {
+    float elapsedTimeSeconds;
+    float backgroundHalfWidth;
+    float backgroundHalfHeight;
+    float padding;
+} pc;
+
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec2 fragLocalCoord;
 layout(location = 2) out vec4 fragParams;
@@ -19,12 +26,10 @@ vec2 quad_corner(uint index) {
 }
 
 void main() {
-    const vec2 worldHalfExtents = vec2(100.0, 75.0);
-
     vec2 localCoord = quad_corner(gl_VertexIndex);
     vec2 worldOffset = localCoord * inParams.x;
     vec2 worldPoint = inPosition + worldOffset;
-    vec2 clipPoint = worldPoint / worldHalfExtents;
+    vec2 clipPoint = worldPoint / vec2(pc.backgroundHalfWidth, pc.backgroundHalfHeight);
 
     fragColor = inColor;
     fragLocalCoord = localCoord;

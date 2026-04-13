@@ -1,6 +1,7 @@
 #pragma once
 
 #include "math.h"
+#include "profile_store.h"
 
 #include <array>
 #include <cstddef>
@@ -50,7 +51,7 @@ struct ScoreGlowLayerTuning {
 
 struct ScorePopupTuning {
     float lifetimeSeconds = 0.5f;
-    std::uint32_t scoreFlashTriggerThreshold = 800;
+    std::uint32_t scoreFlashTriggerThreshold = 500;
     float scale = 0.021f;
     float verticalGap = 0.028f;
     float riseDistance = 0.016f;
@@ -89,6 +90,9 @@ struct HudState {
     std::uint32_t score = 0;
     std::uint32_t lives = 0;
     std::uint32_t wave = 0;
+    float waveAnnouncementTimer = 0.0f;
+    bool restartPromptVisible = false;
+    std::uint32_t gameOverMenuSelectedIndex = 0;
     ColorRgb laserColor{};
     float scoreFlashEnergy = 0.0f;
     ColorRgb scoreMilestoneColor{};
@@ -100,6 +104,45 @@ struct HudState {
     bool shipFlashing = false;
 };
 
+struct GameOverMenuButtonSpec {
+    const char* label = nullptr;
+    float centerY = 0.0f;
+};
+
+inline constexpr float kGameOverMenuButtonScale = 0.032f;
+inline constexpr float kGameOverMenuButtonLetterSpacing = 0.3f * kGameOverMenuButtonScale;
+inline constexpr float kGameOverMenuButtonTextHeight = 1.8f * kGameOverMenuButtonScale;
+inline constexpr float kGameOverMenuButtonPaddingX = 0.03f;
+inline constexpr float kGameOverMenuButtonPaddingY = 0.02f;
+inline constexpr std::array<GameOverMenuButtonSpec, 2> kGameOverMenuButtons{{
+    {"RESTART", -0.22f},
+    {"MAIN MENU", -0.34f},
+}};
+
+constexpr float game_over_menu_letter_width(char ch) {
+    switch (ch) {
+    case 'I': return 0.7f;
+    case 'M': return 1.2f;
+    case ' ': return 0.5f;
+    default: return 1.0f;
+    }
+}
+
+inline float measure_game_over_menu_text(
+    const char* text,
+    float scale = kGameOverMenuButtonScale,
+    float spacing = kGameOverMenuButtonLetterSpacing
+) {
+    float width = 0.0f;
+    for (const char* character = text; *character != '\0'; ++character) {
+        if (character != text) {
+            width += spacing;
+        }
+        width += game_over_menu_letter_width(*character) * scale;
+    }
+    return width;
+}
+
 enum class AudioEventType : std::uint32_t {
     None = 0,
     LaserFired = 1,
@@ -108,14 +151,16 @@ enum class AudioEventType : std::uint32_t {
     AsteroidDestroyedMedium = 4,
     AsteroidDestroyedSmall = 5,
     ShipExploded = 6,
-    ExtraLife = 7,
-    WaveStarted = 8,
-    ScoreMilestone5k = 9,
-    ScoreMilestone10k = 10,
-    GameOver = 11,
-    MenuHover = 12,
-    MenuSelect = 13,
-    PauseMenuOpened = 14,
+    ShipRespawned = 7,
+    ExtraLife = 8,
+    WaveStarted = 9,
+    ScoreMilestone5k = 10,
+    ScoreMilestone10k = 11,
+    GameOver = 12,
+    MenuHover = 13,
+    MenuSelect = 14,
+    PauseMenuOpened = 15,
+    ScoreComboTick = 16,
 };
 
 struct AudioEvent {
@@ -129,6 +174,10 @@ struct AudioFrameState {
     bool thrustActive = false;
     bool collisionWarningActive = false;
     float collisionWarningIntensity = 0.0f;
+    bool respawnHumActive = false;
+    float respawnHumIntensity = 0.0f;
+    bool laserMotionActive = false;
+    float laserMotionIntensity = 0.0f;
     std::size_t eventCount = 0;
     std::array<AudioEvent, kMaxEvents> events{};
 };
@@ -250,7 +299,7 @@ struct LaserConfig {
     std::size_t maxActiveShots = 4;
     float speed = 170.0f;
     float inheritedVelocityFactor = 0.35f;
-    float lifetimeSeconds = 0.8f;
+    float lifetimeSeconds = 0.8f * (2.0f / 3.0f);
     float length = 0.56f;
     float width = 0.24f;
     float glowScale = 8.0f;
@@ -324,6 +373,8 @@ struct AsteroidFieldConfig {
     std::size_t asteroidCount = 14;
     float minSize = 5.0f;
     float maxSize = 13.0f;
+    float earlyWaveSpawnMinSize = 8.0f;
+    std::uint32_t spawnMinSizeRampEndWave = 5;
     float minSpeed = 6.0f;
     float maxSpeed = 19.0f;
     float minAngularSpeedRadiansPerSecond = -0.55f;
@@ -361,6 +412,9 @@ class GameState {
 public:
     static constexpr float kWorldHalfWidth = 100.0f;
     static constexpr float kWorldHalfHeight = 75.0f;
+    static constexpr float kWaveAdvanceDelaySeconds = 1.0f;
+    static constexpr float kWaveAnnouncementSeconds = 1.5f;
+    static constexpr float kGameOverRestartDelaySeconds = 2.0f;
 
     GameState();
 
@@ -373,6 +427,7 @@ public:
     std::span<const AsteroidRenderData> asteroids() const;
     HudState hud_state() const;
     AudioFrameState consume_audio_frame();
+    RunSummary run_summary() const;
     void reset();
 
 private:
@@ -403,6 +458,7 @@ private:
     AsteroidState spawn_asteroid();
     std::vector<AsteroidState> split_asteroid(const AsteroidState& asteroid);
     std::optional<AsteroidSizeClass> next_size_class(AsteroidSizeClass sizeClass) const;
+    float spawn_min_size_for_wave(std::uint32_t wave) const;
     float child_scale_for_size_class(AsteroidSizeClass sizeClass) const;
     float child_radial_perturbation_for_size_class(AsteroidSizeClass sizeClass) const;
     void apply_child_shape_variation(AsteroidState& asteroid);
@@ -423,12 +479,14 @@ private:
     void emit_laser_shot();
     void process_ship_input(float deltaTimeSeconds, const InputState& inputState);
     void update_pending_rewards(float deltaTimeSeconds);
+    void update_laser_audio_state();
     std::uint32_t score_for_asteroid(AsteroidSizeClass sizeClass) const;
     void award_score(std::uint32_t points);
     void trigger_score_milestone(std::uint32_t milestoneScore);
     void begin_death_sequence();
     void emit_ship_explosion_particles();
     bool is_center_safe_for_respawn() const;
+    void start_next_wave();
     void reset_audio_frame_state();
     void push_audio_event(AudioEventType type, float scalar = 0.0f);
     void spawn_wave();
@@ -468,9 +526,15 @@ private:
     float scoreMilestoneFlashMinimumVisibleEnergy_ = 0.0f;
     std::uint32_t recentScorePopupValue_ = 0;
     float recentScorePopupTimer_ = 0.0f;
+    float waveAnnouncementTimer_ = 0.0f;
+    float waveAdvanceDelayTimer_ = 0.0f;
     float phaseTimer_ = 0.0f;
     float invulnerabilityTimer_ = 0.0f;
+    float gameOverTimer_ = 0.0f;
+    bool waveAdvancePending_ = false;
     bool extraLifeAwarded_ = false;
     bool extraLifeRevealPending_ = false;
     float extraLifeRevealTimer_ = 0.0f;
+    std::uint32_t asteroidsDestroyedThisRun_ = 0;
+    float playTimeThisRunSeconds_ = 0.0f;
 };

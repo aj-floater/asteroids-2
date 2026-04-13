@@ -2,6 +2,9 @@
 
 layout(push_constant) uniform StarPushConstants {
     float elapsedTimeSeconds;
+    float backgroundHalfWidth;
+    float backgroundHalfHeight;
+    float padding;
 } pc;
 
 layout(location = 0) in vec4 fragColor;

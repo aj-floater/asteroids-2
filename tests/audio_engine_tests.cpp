@@ -229,6 +229,19 @@ void test_collision_warning_release_decays_toward_silence() {
     expect(lateAverage < 0.01f, "collision warning release tail should approach silence");
 }
 
+void test_respawn_hum_emits_audio_when_active() {
+    ProceduralAudioMixer mixer;
+    std::vector<float> output(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    AudioFrameState audioFrameState;
+    audioFrameState.respawnHumActive = true;
+    audioFrameState.respawnHumIntensity = 1.0f;
+    mixer.submit_audio_frame(audioFrameState);
+    mixer.mix(output.data(), 8192);
+
+    expect(max_abs_sample(output) > 0.003f, "active respawn hum should produce an audible low waiting bed");
+}
+
 void test_laser_event_emits_audio_when_idle() {
     ProceduralAudioMixer mixer;
     std::vector<float> output(2048 * ProceduralAudioMixer::kChannelCount, 0.0f);
@@ -242,6 +255,19 @@ void test_laser_event_emits_audio_when_idle() {
     expect(max_abs_sample(output) > 0.01f, "laser event should produce an audible one-shot without thrust");
 }
 
+void test_laser_motion_layer_emits_audio_when_active() {
+    ProceduralAudioMixer mixer;
+    std::vector<float> output(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    AudioFrameState audioFrameState;
+    audioFrameState.laserMotionActive = true;
+    audioFrameState.laserMotionIntensity = 0.75f;
+    mixer.submit_audio_frame(audioFrameState);
+    mixer.mix(output.data(), 8192);
+
+    expect(max_abs_sample(output) > 0.004f, "active laser motion layer should produce an audible beam movement bed");
+}
+
 void test_ship_explosion_event_emits_audio_when_idle() {
     ProceduralAudioMixer mixer;
     std::vector<float> output(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
@@ -253,6 +279,19 @@ void test_ship_explosion_event_emits_audio_when_idle() {
     mixer.mix(output.data(), 8192);
 
     expect(max_abs_sample(output) > 0.01f, "ship explosion event should produce an audible burst without thrust");
+}
+
+void test_respawn_event_emits_audio_when_idle() {
+    ProceduralAudioMixer mixer;
+    std::vector<float> output(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    AudioFrameState audioFrameState;
+    audioFrameState.eventCount = 1;
+    audioFrameState.events[0].type = AudioEventType::ShipRespawned;
+    mixer.submit_audio_frame(audioFrameState);
+    mixer.mix(output.data(), 8192);
+
+    expect(max_abs_sample(output) > 0.006f, "respawn event should produce an audible re-entry cue");
 }
 
 void test_large_asteroid_destroy_event_emits_audio_when_idle() {
@@ -435,6 +474,20 @@ void test_10000_milestone_is_bigger_than_5000_at_same_scalar() {
     );
 }
 
+void test_score_combo_tick_event_emits_audio_when_idle() {
+    ProceduralAudioMixer mixer;
+    std::vector<float> output(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    AudioFrameState audioFrameState;
+    audioFrameState.eventCount = 1;
+    audioFrameState.events[0].type = AudioEventType::ScoreComboTick;
+    audioFrameState.events[0].scalar = 1.8f;
+    mixer.submit_audio_frame(audioFrameState);
+    mixer.mix(output.data(), 8192);
+
+    expect(max_abs_sample(output) > 0.006f, "combo tick should produce an audible one-shot");
+}
+
 void test_menu_hover_event_emits_audio_when_idle() {
     ProceduralAudioMixer mixer;
     std::vector<float> output(4096 * ProceduralAudioMixer::kChannelCount, 0.0f);
@@ -498,6 +551,49 @@ void test_pause_menu_open_event_emits_audio_when_idle() {
     expect(max_abs_sample(output) > 0.006f, "pause menu opening should produce an audible UI cue");
 }
 
+void test_zero_sfx_volume_mutes_output() {
+    ProceduralAudioMixer mixer;
+    std::vector<float> output(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    mixer.set_sfx_volume(0.0f);
+
+    AudioFrameState audioFrameState;
+    audioFrameState.thrustActive = true;
+    audioFrameState.eventCount = 1;
+    audioFrameState.events[0].type = AudioEventType::LaserFired;
+    mixer.submit_audio_frame(audioFrameState);
+    mixer.mix(output.data(), 8192);
+
+    expect(max_abs_sample(output) < 0.0001f, "zero SFX volume should mute all mixer output");
+}
+
+void test_lower_sfx_volume_reduces_total_energy() {
+    ProceduralAudioMixer loudMixer;
+    ProceduralAudioMixer quietMixer;
+    std::vector<float> loudOutput(16384 * ProceduralAudioMixer::kChannelCount, 0.0f);
+    std::vector<float> quietOutput(16384 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    quietMixer.set_sfx_volume(0.25f);
+
+    AudioFrameState audioFrameState;
+    audioFrameState.thrustActive = true;
+    audioFrameState.collisionWarningActive = true;
+    audioFrameState.collisionWarningIntensity = 0.7f;
+    audioFrameState.eventCount = 1;
+    audioFrameState.events[0].type = AudioEventType::MenuSelect;
+
+    loudMixer.submit_audio_frame(audioFrameState);
+    loudMixer.mix(loudOutput.data(), 16384);
+
+    quietMixer.submit_audio_frame(audioFrameState);
+    quietMixer.mix(quietOutput.data(), 16384);
+
+    expect(
+        total_abs_sample(loudOutput) > total_abs_sample(quietOutput) * 2.5f,
+        "lower SFX volume should substantially reduce total mixer energy"
+    );
+}
+
 }
 
 int main() {
@@ -510,8 +606,11 @@ int main() {
         {"collision_warning_higher_intensity_increases_total_energy", test_collision_warning_higher_intensity_increases_total_energy},
         {"collision_warning_high_intensity_has_higher_sustain_floor", test_collision_warning_high_intensity_has_higher_sustain_floor},
         {"collision_warning_release_decays_toward_silence", test_collision_warning_release_decays_toward_silence},
+        {"respawn_hum_emits_audio_when_active", test_respawn_hum_emits_audio_when_active},
         {"laser_event_emits_audio_when_idle", test_laser_event_emits_audio_when_idle},
+        {"laser_motion_layer_emits_audio_when_active", test_laser_motion_layer_emits_audio_when_active},
         {"ship_explosion_event_emits_audio_when_idle", test_ship_explosion_event_emits_audio_when_idle},
+        {"respawn_event_emits_audio_when_idle", test_respawn_event_emits_audio_when_idle},
         {"large_asteroid_destroy_event_emits_audio_when_idle", test_large_asteroid_destroy_event_emits_audio_when_idle},
         {"large_asteroid_destroy_is_weightier_than_small", test_large_asteroid_destroy_is_weightier_than_small},
         {"large_asteroid_destroy_has_longer_sustain_than_small", test_large_asteroid_destroy_has_longer_sustain_than_small},
@@ -520,10 +619,13 @@ int main() {
         {"higher_5000_milestone_scalar_increases_total_energy", test_higher_5000_milestone_scalar_increases_total_energy},
         {"higher_10000_milestone_scalar_increases_total_energy", test_higher_10000_milestone_scalar_increases_total_energy},
         {"10000_milestone_is_bigger_than_5000_at_same_scalar", test_10000_milestone_is_bigger_than_5000_at_same_scalar},
+        {"score_combo_tick_event_emits_audio_when_idle", test_score_combo_tick_event_emits_audio_when_idle},
         {"menu_hover_event_emits_audio_when_idle", test_menu_hover_event_emits_audio_when_idle},
         {"menu_select_event_emits_audio_when_idle", test_menu_select_event_emits_audio_when_idle},
         {"menu_select_carries_more_energy_than_hover", test_menu_select_carries_more_energy_than_hover},
         {"pause_menu_open_event_emits_audio_when_idle", test_pause_menu_open_event_emits_audio_when_idle},
+        {"zero_sfx_volume_mutes_output", test_zero_sfx_volume_mutes_output},
+        {"lower_sfx_volume_reduces_total_energy", test_lower_sfx_volume_reduces_total_energy},
     };
 
     for (const auto& [name, test] : tests) {

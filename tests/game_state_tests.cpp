@@ -1,4 +1,5 @@
 #include "game_state.h"
+#include "viewport_layout.h"
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +44,18 @@ struct GameStateTestAccess {
 
     static const AsteroidFieldConfig& asteroid_config(const GameState& gameState) {
         return gameState.asteroidConfig_;
+    }
+
+    static AsteroidFieldConfig& asteroid_config(GameState& gameState) {
+        return gameState.asteroidConfig_;
+    }
+
+    static AsteroidState spawn_asteroid(GameState& gameState) {
+        return gameState.spawn_asteroid();
+    }
+
+    static float spawn_min_size_for_wave(const GameState& gameState, std::uint32_t wave) {
+        return gameState.spawn_min_size_for_wave(wave);
     }
 
     static std::uint32_t& rng_state(GameState& gameState) {
@@ -123,6 +136,14 @@ struct GameStateTestAccess {
         return gameState.recentScorePopupTimer_;
     }
 
+    static float& wave_announcement_timer(GameState& gameState) {
+        return gameState.waveAnnouncementTimer_;
+    }
+
+    static float& wave_advance_delay_timer(GameState& gameState) {
+        return gameState.waveAdvanceDelayTimer_;
+    }
+
     static void reset_audio_frame(GameState& gameState) {
         gameState.reset_audio_frame_state();
     }
@@ -133,6 +154,14 @@ struct GameStateTestAccess {
 
     static float& invulnerability_timer(GameState& gameState) {
         return gameState.invulnerabilityTimer_;
+    }
+
+    static float& game_over_timer(GameState& gameState) {
+        return gameState.gameOverTimer_;
+    }
+
+    static bool& wave_advance_pending(GameState& gameState) {
+        return gameState.waveAdvancePending_;
     }
 
     static bool& extra_life_awarded(GameState& gameState) {
@@ -181,6 +210,45 @@ void expect(bool condition, const std::string& message) {
     }
 }
 
+void test_fixed_aspect_viewport_matches_default_ratio() {
+    const FixedAspectViewportLayout layout =
+        compute_fixed_aspect_viewport_layout(1280, 960);
+
+    expect(layout.playableOffsetX == 0, "default viewport should not pillarbox");
+    expect(layout.playableOffsetY == 0, "default viewport should not letterbox");
+    expect(layout.playableWidth == 1280, "default viewport should fill the full width");
+    expect(layout.playableHeight == 960, "default viewport should fill the full height");
+    expect(std::abs(layout.playableUvMinX) < 0.0001f, "default viewport min X uv should be zero");
+    expect(std::abs(layout.playableUvMinY) < 0.0001f, "default viewport min Y uv should be zero");
+    expect(std::abs(layout.playableUvMaxX - 1.0f) < 0.0001f, "default viewport max X uv should be one");
+    expect(std::abs(layout.playableUvMaxY - 1.0f) < 0.0001f, "default viewport max Y uv should be one");
+}
+
+void test_fixed_aspect_viewport_pillarboxes_wide_window() {
+    const FixedAspectViewportLayout layout =
+        compute_fixed_aspect_viewport_layout(1600, 900);
+
+    expect(layout.playableOffsetX == 200, "wide windows should center the playable frame horizontally");
+    expect(layout.playableOffsetY == 0, "wide windows should not add vertical margins");
+    expect(layout.playableWidth == 1200, "wide windows should preserve the default 4:3 width inside the frame");
+    expect(layout.playableHeight == 900, "wide windows should use the full height for the playable frame");
+}
+
+void test_window_point_mapping_rejects_margin_space() {
+    const FixedAspectViewportLayout layout =
+        compute_fixed_aspect_viewport_layout(1600, 900);
+
+    expect(
+        !map_window_point_to_playable_ndc(layout, 100.0, 450.0).has_value(),
+        "points inside the side margin should not map into playable-space NDC"
+    );
+
+    const auto center = map_window_point_to_playable_ndc(layout, 800.0, 450.0);
+    expect(center.has_value(), "the center of the framed viewport should map into playable-space NDC");
+    expect(std::abs(center->x) < 0.0001f, "the framed viewport center should map to zero X");
+    expect(std::abs(center->y) < 0.0001f, "the framed viewport center should map to zero Y");
+}
+
 void reset_world(GameState& gameState) {
     GameStateTestAccess::ship(gameState) = {
         .position = {0.0f, 0.0f},
@@ -205,9 +273,13 @@ void reset_world(GameState& gameState) {
     GameStateTestAccess::score_milestone_flash_minimum_visible_energy(gameState) = 0.0f;
     GameStateTestAccess::recent_score_popup_value(gameState) = 0;
     GameStateTestAccess::recent_score_popup_timer(gameState) = 0.0f;
+    GameStateTestAccess::wave_announcement_timer(gameState) = 0.0f;
+    GameStateTestAccess::wave_advance_delay_timer(gameState) = 0.0f;
     GameStateTestAccess::reset_audio_frame(gameState);
     GameStateTestAccess::phase_timer(gameState) = 0.0f;
     GameStateTestAccess::invulnerability_timer(gameState) = 0.0f;
+    GameStateTestAccess::game_over_timer(gameState) = 0.0f;
+    GameStateTestAccess::wave_advance_pending(gameState) = false;
     GameStateTestAccess::extra_life_awarded(gameState) = false;
     GameStateTestAccess::extra_life_reveal_pending(gameState) = false;
     GameStateTestAccess::extra_life_reveal_timer(gameState) = 0.0f;
@@ -285,6 +357,10 @@ std::size_t count_audio_events(const AudioFrameState& audioFrame, AudioEventType
 
 bool collision_warning_active(const AudioFrameState& audioFrame) {
     return audioFrame.collisionWarningActive && audioFrame.collisionWarningIntensity > 0.001f;
+}
+
+bool respawn_hum_active(const AudioFrameState& audioFrame) {
+    return audioFrame.respawnHumActive && audioFrame.respawnHumIntensity > 0.001f;
 }
 
 void test_firing_creates_laser_and_render_data() {
@@ -369,6 +445,29 @@ void test_firing_queues_laser_audio_event() {
     expect(has_audio_event(audioFrame, AudioEventType::LaserFired), "firing should queue a laser sound event");
 }
 
+void test_ship_wrap_waits_until_full_geometry_is_offscreen() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::asteroids(gameState).push_back(
+        make_test_asteroid(AsteroidSizeClass::Large, {80.0f, 60.0f}, 6.0f)
+    );
+    GameStateTestAccess::rebuild_render_data(gameState);
+
+    GameStateTestAccess::ship(gameState).position = {GameState::kWorldHalfWidth + 3.1f, 0.0f};
+    gameState.update(0.0f, InputState{});
+    expect(
+        GameStateTestAccess::ship(gameState).position.x > GameState::kWorldHalfWidth,
+        "ship should not wrap while part of its geometry is still visible"
+    );
+
+    GameStateTestAccess::ship(gameState).position = {GameState::kWorldHalfWidth + 3.25f, 0.0f};
+    gameState.update(0.0f, InputState{});
+    expect(
+        GameStateTestAccess::ship(gameState).position.x < -GameState::kWorldHalfWidth,
+        "ship should wrap only after its full geometry clears the edge"
+    );
+}
+
 void test_asteroid_hit_queues_impact_and_destroy_audio_events() {
     GameState gameState;
     reset_world(gameState);
@@ -430,18 +529,89 @@ void test_ship_collision_queues_explosion_audio_event() {
     expect(has_audio_event(audioFrame, AudioEventType::ShipExploded), "ship death should queue the explosion sound event");
 }
 
-void test_wave_transition_queues_wave_started_audio_event() {
+void test_field_clear_queues_wave_started_audio_event() {
     GameState gameState;
     reset_world(gameState);
-    GameStateTestAccess::phase(gameState) = GamePhase::WaveTransition;
-    GameStateTestAccess::phase_timer(gameState) = 0.01f;
     GameStateTestAccess::wave(gameState) = 1;
+    GameStateTestAccess::wave_advance_pending(gameState) = true;
 
     InputState inputState;
     gameState.update(0.02f, inputState);
 
     const AudioFrameState audioFrame = gameState.consume_audio_frame();
     expect(has_audio_event(audioFrame, AudioEventType::WaveStarted), "starting a new wave should queue the wave-start sound event");
+}
+
+void test_initial_wave_has_no_level_announcement() {
+    GameState gameState;
+
+    const HudState hudState = gameState.hud_state();
+    expect(hudState.wave == 1, "new game should start on wave 1");
+    expect(std::abs(hudState.waveAnnouncementTimer) < 0.0001f, "wave 1 should not show the level reminder");
+}
+
+void test_spawn_min_size_ramps_down_to_late_game_floor_by_wave_five() {
+    GameState gameState;
+    const AsteroidFieldConfig& asteroidConfig = GameStateTestAccess::asteroid_config(gameState);
+
+    expect(
+        std::abs(GameStateTestAccess::spawn_min_size_for_wave(gameState, 1) - asteroidConfig.earlyWaveSpawnMinSize) < 0.0001f,
+        "wave 1 should use the protected larger minimum spawn size"
+    );
+    expect(
+        std::abs(GameStateTestAccess::spawn_min_size_for_wave(gameState, 3) - 6.5f) < 0.0001f,
+        "wave 3 should sit midway through the early-wave size ramp"
+    );
+    expect(
+        std::abs(
+            GameStateTestAccess::spawn_min_size_for_wave(gameState, asteroidConfig.spawnMinSizeRampEndWave) -
+            asteroidConfig.minSize
+        ) < 0.0001f,
+        "wave 5 should already be back at the normal minimum spawn size"
+    );
+    expect(
+        std::abs(GameStateTestAccess::spawn_min_size_for_wave(gameState, 8) - asteroidConfig.minSize) < 0.0001f,
+        "later waves should keep the normal minimum spawn size"
+    );
+}
+
+void test_early_wave_spawns_respect_ramped_minimum_size() {
+    GameState gameState;
+    AsteroidFieldConfig& asteroidConfig = GameStateTestAccess::asteroid_config(gameState);
+    asteroidConfig.radialJitter = 0.0f;
+    GameStateTestAccess::wave(gameState) = 1;
+    GameStateTestAccess::rng_state(gameState) = asteroidConfig.randomSeed;
+
+    for (int sample = 0; sample < 128; ++sample) {
+        const AsteroidState asteroid = GameStateTestAccess::spawn_asteroid(gameState);
+        expect(
+            asteroid.outerRadius >= asteroidConfig.earlyWaveSpawnMinSize - 0.001f,
+            "early waves should not spawn tiny starting asteroids below the protected minimum"
+        );
+    }
+}
+
+void test_late_wave_spawns_can_reach_smaller_starting_sizes_again() {
+    GameState gameState;
+    AsteroidFieldConfig& asteroidConfig = GameStateTestAccess::asteroid_config(gameState);
+    asteroidConfig.radialJitter = 0.0f;
+    GameStateTestAccess::wave(gameState) = 8;
+    GameStateTestAccess::rng_state(gameState) = asteroidConfig.randomSeed;
+
+    float smallestSpawnedRadius = asteroidConfig.maxSize;
+    for (int sample = 0; sample < 128; ++sample) {
+        const AsteroidState asteroid = GameStateTestAccess::spawn_asteroid(gameState);
+        smallestSpawnedRadius = std::min(smallestSpawnedRadius, asteroid.outerRadius);
+    }
+
+    expect(
+        smallestSpawnedRadius < asteroidConfig.earlyWaveSpawnMinSize - 0.001f,
+        "later waves should allow smaller starting asteroids again"
+    );
+    expect(
+        smallestSpawnedRadius >= asteroidConfig.minSize - 0.001f,
+        "later waves should still respect the normal minimum spawn size floor"
+    );
 }
 
 void test_game_over_transition_queues_audio_event() {
@@ -628,6 +798,38 @@ void test_firing_resumes_after_active_shots_clear() {
     expect(GameStateTestAccess::lasers(gameState).size() == 1, "a new shot should be allowed after active lasers expire");
 }
 
+void test_laser_wrap_waits_until_full_geometry_is_offscreen() {
+    GameState gameState;
+    reset_world(gameState);
+
+    LaserState laser{};
+    laser.position = {GameState::kWorldHalfWidth + 0.1f, 0.0f};
+    laser.previousPosition = laser.position;
+    laser.velocity = {0.0f, 0.0f};
+    laser.headingRadians = 0.0f;
+    laser.ageSeconds = 0.0f;
+    laser.lifetimeSeconds = GameStateTestAccess::laser_config(gameState).lifetimeSeconds;
+    GameStateTestAccess::lasers(gameState).push_back(laser);
+
+    gameState.update(0.0f, InputState{});
+    expect(GameStateTestAccess::lasers(gameState).size() == 1, "partially visible laser should remain active");
+    expect(
+        GameStateTestAccess::lasers(gameState).front().position.x > GameState::kWorldHalfWidth,
+        "laser should not wrap while part of its rendered rectangle is still visible"
+    );
+
+    GameStateTestAccess::lasers(gameState).front().position = {GameState::kWorldHalfWidth + 0.4f, 0.0f};
+    GameStateTestAccess::lasers(gameState).front().previousPosition =
+        GameStateTestAccess::lasers(gameState).front().position;
+
+    gameState.update(0.0f, InputState{});
+    expect(GameStateTestAccess::lasers(gameState).size() == 1, "fully off-screen laser should wrap instead of despawning");
+    expect(
+        GameStateTestAccess::lasers(gameState).front().position.x < -GameState::kWorldHalfWidth,
+        "laser should wrap after its full rendered rectangle clears the edge"
+    );
+}
+
 void test_large_asteroid_splits_into_two_mediums() {
     GameState gameState;
     reset_world(gameState);
@@ -721,14 +923,16 @@ void test_small_asteroid_is_destroyed() {
     GameState gameState;
     reset_world(gameState);
     GameStateTestAccess::asteroids(gameState).push_back(make_test_asteroid(AsteroidSizeClass::Small, {20.0f, 0.0f}, 1.75f));
+    GameStateTestAccess::asteroids(gameState).push_back(make_test_asteroid(AsteroidSizeClass::Large, {80.0f, 60.0f}, 6.0f));
     GameStateTestAccess::rebuild_render_data(gameState);
 
     InputState inputState;
     inputState.firePressed = true;
     gameState.update(0.12f, inputState);
 
-    expect(GameStateTestAccess::asteroids(gameState).empty(), "small asteroid should be destroyed outright");
-    expect(gameState.asteroids().empty(), "destroyed asteroid should disappear from render data");
+    expect(asteroid_count(gameState, AsteroidSizeClass::Small) == 0, "small asteroid should be destroyed outright");
+    expect(GameStateTestAccess::asteroids(gameState).size() == 1, "only the untouched asteroid should remain");
+    expect(gameState.asteroids().size() == 1, "destroyed asteroid should disappear from render data");
     expect(
         GameStateTestAccess::effect_particles(gameState).size() == expected_effect_count_for_size(gameState, AsteroidSizeClass::Small),
         "small asteroid hit should emit the configured effect count"
@@ -760,13 +964,15 @@ void test_laser_sweep_prevents_tunneling() {
     GameState gameState;
     reset_world(gameState);
     GameStateTestAccess::asteroids(gameState).push_back(make_test_asteroid(AsteroidSizeClass::Small, {20.0f, 0.0f}, 1.0f));
+    GameStateTestAccess::asteroids(gameState).push_back(make_test_asteroid(AsteroidSizeClass::Large, {80.0f, 60.0f}, 6.0f));
     GameStateTestAccess::rebuild_render_data(gameState);
 
     InputState inputState;
     inputState.firePressed = true;
     gameState.update(0.25f, inputState);
 
-    expect(GameStateTestAccess::asteroids(gameState).empty(), "laser sweep should still hit a small asteroid");
+    expect(asteroid_count(gameState, AsteroidSizeClass::Small) == 0, "laser sweep should still hit a small asteroid");
+    expect(GameStateTestAccess::asteroids(gameState).size() == 1, "only the untouched asteroid should remain after the sweep hit");
     expect(!GameStateTestAccess::effect_particles(gameState).empty(), "sweep hit should still emit impact effects");
 }
 
@@ -905,10 +1111,15 @@ void test_awarding_score_below_popup_flash_threshold_does_not_flash_score() {
     reset_world(gameState);
 
     GameStateTestAccess::award_score(gameState, 20);
+    const AudioFrameState audioFrame = gameState.consume_audio_frame();
 
     expect(
         std::abs(GameStateTestAccess::score_flash_energy(gameState)) < 0.0001f,
         "awarding score below the stacked popup threshold should not flash the main score"
+    );
+    expect(
+        !has_audio_event(audioFrame, AudioEventType::ScoreComboTick),
+        "awarding score below the stacked popup threshold should not queue the combo tick"
     );
 }
 
@@ -937,10 +1148,15 @@ void test_score_flash_starts_when_recent_score_popup_crosses_threshold() {
     );
 
     GameStateTestAccess::award_score(gameState, 20);
+    const AudioFrameState audioFrame = gameState.consume_audio_frame();
 
     expect(
         std::abs(GameStateTestAccess::score_flash_energy(gameState) - kScoreFeedbackTuning.scoreHit.addedEnergy) < 0.0001f,
         "the main score should flash once when the stacked popup crosses the threshold"
+    );
+    expect(
+        count_audio_events(audioFrame, AudioEventType::ScoreComboTick) == 1,
+        "crossing the stacked popup threshold should queue one combo tick"
     );
 }
 
@@ -950,12 +1166,18 @@ void test_score_flash_retriggers_while_popup_stays_above_threshold() {
 
     GameStateTestAccess::award_score(gameState, kScoreFeedbackTuning.popup.scoreFlashTriggerThreshold + 20);
     const float flashEnergyAfterCrossing = GameStateTestAccess::score_flash_energy(gameState);
+    gameState.consume_audio_frame();
 
     GameStateTestAccess::award_score(gameState, 50);
+    const AudioFrameState audioFrame = gameState.consume_audio_frame();
 
     expect(
         std::abs(GameStateTestAccess::score_flash_energy(gameState) - (flashEnergyAfterCrossing + kScoreFeedbackTuning.scoreHit.addedEnergy)) < 0.0001f,
         "the main score should flash again on later score awards while the same popup stack remains above threshold"
+    );
+    expect(
+        count_audio_events(audioFrame, AudioEventType::ScoreComboTick) == 1,
+        "later score awards should keep queuing the combo tick while the popup stack stays above threshold"
     );
 }
 
@@ -1097,6 +1319,9 @@ void test_hud_state_exposes_score_flash_and_milestone_state() {
     GameStateTestAccess::score_milestone_flash_energy(gameState) = 2.25f;
     GameStateTestAccess::recent_score_popup_value(gameState) = 170;
     GameStateTestAccess::recent_score_popup_timer(gameState) = 0.32f;
+    GameStateTestAccess::wave_announcement_timer(gameState) = 0.85f;
+    GameStateTestAccess::phase(gameState) = GamePhase::GameOver;
+    GameStateTestAccess::game_over_timer(gameState) = GameState::kGameOverRestartDelaySeconds;
 
     const HudState hudState = gameState.hud_state();
     const ColorRgb& laserColor = GameStateTestAccess::laser_config(gameState).color;
@@ -1111,6 +1336,8 @@ void test_hud_state_exposes_score_flash_and_milestone_state() {
     expect(std::abs(hudState.scoreMilestoneColor.b - 0.18f) < 0.0001f, "hud state should expose milestone flash blue");
     expect(hudState.recentScorePopupValue == 170, "hud state should expose the recent score popup value");
     expect(std::abs(hudState.recentScorePopupTimer - 0.32f) < 0.0001f, "hud state should expose the recent score popup timer");
+    expect(std::abs(hudState.waveAnnouncementTimer - 0.85f) < 0.0001f, "hud state should expose the wave announcement timer");
+    expect(hudState.restartPromptVisible, "hud state should expose the delayed game-over restart prompt");
     expect(hudState.lives == 3, "hud state should expose the delayed life reveal count");
 }
 
@@ -1154,6 +1381,19 @@ void test_respawn_when_center_clear() {
     expect(std::abs(GameStateTestAccess::ship(gameState).position.y) < 0.001f, "ship should respawn at origin y");
 }
 
+void test_respawn_queues_audio_event() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::phase(gameState) = GamePhase::Respawning;
+    GameStateTestAccess::asteroids(gameState).push_back(make_test_asteroid(AsteroidSizeClass::Large, {80.0f, 60.0f}, 6.0f));
+
+    gameState.update(0.016f, InputState{});
+    const AudioFrameState audioFrame = gameState.consume_audio_frame();
+
+    expect(has_audio_event(audioFrame, AudioEventType::ShipRespawned), "respawning should queue the respawn sound event");
+    expect(!respawn_hum_active(audioFrame), "successful respawn should not keep the waiting hum active");
+}
+
 void test_respawn_blocked_when_center_occupied() {
     GameState gameState;
     reset_world(gameState);
@@ -1162,8 +1402,10 @@ void test_respawn_blocked_when_center_occupied() {
 
     InputState inputState;
     gameState.update(0.016f, inputState);
+    const AudioFrameState audioFrame = gameState.consume_audio_frame();
 
     expect(GameStateTestAccess::phase(gameState) == GamePhase::Respawning, "should remain Respawning when center is occupied");
+    expect(respawn_hum_active(audioFrame), "blocked respawn should keep the low respawn hum active");
 }
 
 void test_invulnerability_prevents_collision() {
@@ -1194,29 +1436,58 @@ void test_invulnerability_expires() {
     expect(GameStateTestAccess::phase(gameState) == GamePhase::Playing, "invulnerability should expire to Playing");
 }
 
-void test_wave_transition_on_field_clear() {
+void test_field_clear_waits_for_wave_delay_before_spawning_next_wave() {
     GameState gameState;
     reset_world(gameState);
+    GameStateTestAccess::wave(gameState) = 1;
+    GameStateTestAccess::wave_advance_pending(gameState) = true;
+    GameStateTestAccess::wave_advance_delay_timer(gameState) = GameState::kWaveAdvanceDelaySeconds;
 
     InputState inputState;
     gameState.update(0.016f, inputState);
 
-    expect(GameStateTestAccess::phase(gameState) == GamePhase::WaveTransition, "empty field should trigger WaveTransition");
+    expect(GameStateTestAccess::phase(gameState) == GamePhase::Playing, "field clear should keep gameplay active");
+    expect(GameStateTestAccess::wave(gameState) == 1, "field clear should wait before advancing the wave");
+    expect(GameStateTestAccess::asteroids(gameState).empty(), "field clear delay should hold next-wave spawns briefly");
+    expect(
+        GameStateTestAccess::wave_advance_delay_timer(gameState) < GameState::kWaveAdvanceDelaySeconds,
+        "field clear should count down the next-wave delay timer"
+    );
 }
 
-void test_wave_spawns_more_asteroids() {
+void test_new_wave_starts_after_delay_with_announcement_timer() {
     GameState gameState;
     reset_world(gameState);
-    GameStateTestAccess::phase(gameState) = GamePhase::WaveTransition;
-    GameStateTestAccess::phase_timer(gameState) = 0.01f;
     GameStateTestAccess::wave(gameState) = 1;
+    GameStateTestAccess::wave_advance_pending(gameState) = true;
+    GameStateTestAccess::wave_advance_delay_timer(gameState) = 0.01f;
 
     InputState inputState;
-    gameState.update(0.02f, inputState);
+    gameState.update(0.016f, inputState);
 
-    expect(GameStateTestAccess::phase(gameState) == GamePhase::Playing, "WaveTransition should end in Playing");
     expect(GameStateTestAccess::wave(gameState) == 2, "wave counter should increment");
     expect(!GameStateTestAccess::asteroids(gameState).empty(), "new wave should spawn asteroids");
+    expect(
+        std::abs(GameStateTestAccess::wave_announcement_timer(gameState) - GameState::kWaveAnnouncementSeconds) < 0.02f,
+        "new wave should start the centered level reminder timer after the delay"
+    );
+}
+
+void test_wave_overlay_uses_next_wave_number_during_prespawn_delay() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::wave(gameState) = 3;
+    GameStateTestAccess::wave_advance_pending(gameState) = true;
+    GameStateTestAccess::wave_advance_delay_timer(gameState) = GameState::kWaveAdvanceDelaySeconds;
+    GameStateTestAccess::wave_announcement_timer(gameState) = GameState::kWaveAnnouncementSeconds;
+
+    const HudState hudState = gameState.hud_state();
+
+    expect(hudState.wave == 4, "pre-spawn wave overlay should announce next wave number");
+    expect(
+        std::abs(hudState.waveAnnouncementTimer - GameState::kWaveAnnouncementSeconds) < 0.0001f,
+        "pre-spawn wave overlay should stay bright through the full lead-in delay"
+    );
 }
 
 void test_extra_life_at_10000() {
@@ -1253,6 +1524,7 @@ void test_restart_from_game_over() {
     GameState gameState;
     reset_world(gameState);
     GameStateTestAccess::phase(gameState) = GamePhase::GameOver;
+    GameStateTestAccess::game_over_timer(gameState) = GameState::kGameOverRestartDelaySeconds;
     GameStateTestAccess::score(gameState) = 5000;
     GameStateTestAccess::lives(gameState) = 0;
 
@@ -1266,20 +1538,78 @@ void test_restart_from_game_over() {
     expect(!GameStateTestAccess::asteroids(gameState).empty(), "restart should spawn asteroids");
 }
 
+void test_restart_from_game_over_waits_for_prompt_delay() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::phase(gameState) = GamePhase::GameOver;
+    GameStateTestAccess::score(gameState) = 5000;
+    GameStateTestAccess::lives(gameState) = 0;
+
+    InputState inputState;
+    inputState.restartPressed = true;
+    gameState.update(GameState::kGameOverRestartDelaySeconds * 0.5f, inputState);
+
+    expect(GameStateTestAccess::phase(gameState) == GamePhase::GameOver, "restart should stay locked during the initial game-over delay");
+
+    const HudState hiddenPromptHud = gameState.hud_state();
+    expect(!hiddenPromptHud.restartPromptVisible, "restart prompt should stay hidden before the delay elapses");
+
+    gameState.update(GameState::kGameOverRestartDelaySeconds * 0.6f, inputState);
+    expect(GameStateTestAccess::phase(gameState) == GamePhase::Playing, "restart should unlock once the prompt delay has elapsed");
+}
+
+void test_restart_from_game_over_changes_wave_seed() {
+    GameState gameState;
+    reset_world(gameState);
+
+    InputState inputState;
+    inputState.restartPressed = true;
+
+    GameStateTestAccess::phase(gameState) = GamePhase::GameOver;
+    GameStateTestAccess::game_over_timer(gameState) = GameState::kGameOverRestartDelaySeconds;
+    gameState.update(0.016f, inputState);
+
+    const auto& firstRestartAsteroids = GameStateTestAccess::asteroids(gameState);
+    expect(!firstRestartAsteroids.empty(), "first restart should spawn asteroids");
+    const Vec2 firstRestartPosition = firstRestartAsteroids.front().position;
+    const float firstRestartSeed = firstRestartAsteroids.front().shadingSeed;
+
+    GameStateTestAccess::phase(gameState) = GamePhase::GameOver;
+    GameStateTestAccess::game_over_timer(gameState) = GameState::kGameOverRestartDelaySeconds;
+    gameState.update(0.016f, inputState);
+
+    const auto& secondRestartAsteroids = GameStateTestAccess::asteroids(gameState);
+    expect(!secondRestartAsteroids.empty(), "second restart should spawn asteroids");
+
+    const bool seedChanged =
+        std::abs(secondRestartAsteroids.front().position.x - firstRestartPosition.x) > 0.001f ||
+        std::abs(secondRestartAsteroids.front().position.y - firstRestartPosition.y) > 0.001f ||
+        std::abs(secondRestartAsteroids.front().shadingSeed - firstRestartSeed) > 0.001f;
+    expect(seedChanged, "restart should not replay the same asteroid seed");
+}
+
 }
 
 int main() {
     const std::vector<std::pair<std::string, void(*)()>> tests = {
+        {"fixed_aspect_viewport_matches_default_ratio", test_fixed_aspect_viewport_matches_default_ratio},
+        {"fixed_aspect_viewport_pillarboxes_wide_window", test_fixed_aspect_viewport_pillarboxes_wide_window},
+        {"window_point_mapping_rejects_margin_space", test_window_point_mapping_rejects_margin_space},
         {"firing_creates_laser_and_render_data", test_firing_creates_laser_and_render_data},
         {"audio_frame_reports_thrust_when_active", test_audio_frame_reports_thrust_when_active},
         {"audio_frame_clears_after_consumption", test_audio_frame_clears_after_consumption},
         {"audio_frame_reports_no_thrust_when_idle", test_audio_frame_reports_no_thrust_when_idle},
         {"audio_events_are_consumed_once", test_audio_events_are_consumed_once},
         {"firing_queues_laser_audio_event", test_firing_queues_laser_audio_event},
+        {"ship_wrap_waits_until_full_geometry_is_offscreen", test_ship_wrap_waits_until_full_geometry_is_offscreen},
         {"asteroid_hit_queues_impact_and_destroy_audio_events", test_asteroid_hit_queues_impact_and_destroy_audio_events},
         {"extra_life_audio_and_hud_reveal_are_delayed", test_extra_life_audio_and_hud_reveal_are_delayed},
         {"ship_collision_queues_explosion_audio_event", test_ship_collision_queues_explosion_audio_event},
-        {"wave_transition_queues_wave_started_audio_event", test_wave_transition_queues_wave_started_audio_event},
+        {"field_clear_queues_wave_started_audio_event", test_field_clear_queues_wave_started_audio_event},
+        {"initial_wave_has_no_level_announcement", test_initial_wave_has_no_level_announcement},
+        {"spawn_min_size_ramps_down_to_late_game_floor_by_wave_five", test_spawn_min_size_ramps_down_to_late_game_floor_by_wave_five},
+        {"early_wave_spawns_respect_ramped_minimum_size", test_early_wave_spawns_respect_ramped_minimum_size},
+        {"late_wave_spawns_can_reach_smaller_starting_sizes_again", test_late_wave_spawns_can_reach_smaller_starting_sizes_again},
         {"game_over_transition_queues_audio_event", test_game_over_transition_queues_audio_event},
         {"collision_warning_activates_for_true_intercept", test_collision_warning_activates_for_true_intercept},
         {"collision_warning_ignores_nearby_asteroid_moving_away", test_collision_warning_ignores_nearby_asteroid_moving_away},
@@ -1290,6 +1620,7 @@ int main() {
         {"collision_warning_is_suppressed_while_invulnerable", test_collision_warning_is_suppressed_while_invulnerable},
         {"firing_caps_active_lasers", test_firing_caps_active_lasers},
         {"firing_resumes_after_active_shots_clear", test_firing_resumes_after_active_shots_clear},
+        {"laser_wrap_waits_until_full_geometry_is_offscreen", test_laser_wrap_waits_until_full_geometry_is_offscreen},
         {"large_asteroid_splits_into_two_mediums", test_large_asteroid_splits_into_two_mediums},
         {"medium_asteroid_splits_into_two_smalls", test_medium_asteroid_splits_into_two_smalls},
         {"split_children_mutate_shape_and_shading_seed", test_split_children_mutate_shape_and_shading_seed},
@@ -1317,14 +1648,18 @@ int main() {
         {"ship_collision_triggers_dying_phase", test_ship_collision_triggers_dying_phase},
         {"dying_transitions_to_respawning", test_dying_transitions_to_respawning},
         {"respawn_when_center_clear", test_respawn_when_center_clear},
+        {"respawn_queues_audio_event", test_respawn_queues_audio_event},
         {"respawn_blocked_when_center_occupied", test_respawn_blocked_when_center_occupied},
         {"invulnerability_prevents_collision", test_invulnerability_prevents_collision},
         {"invulnerability_expires", test_invulnerability_expires},
-        {"wave_transition_on_field_clear", test_wave_transition_on_field_clear},
-        {"wave_spawns_more_asteroids", test_wave_spawns_more_asteroids},
+        {"field_clear_waits_for_wave_delay_before_spawning_next_wave", test_field_clear_waits_for_wave_delay_before_spawning_next_wave},
+        {"new_wave_starts_after_delay_with_announcement_timer", test_new_wave_starts_after_delay_with_announcement_timer},
+        {"wave_overlay_uses_next_wave_number_during_prespawn_delay", test_wave_overlay_uses_next_wave_number_during_prespawn_delay},
         {"extra_life_at_10000", test_extra_life_at_10000},
         {"game_over_on_zero_lives", test_game_over_on_zero_lives},
         {"restart_from_game_over", test_restart_from_game_over},
+        {"restart_from_game_over_waits_for_prompt_delay", test_restart_from_game_over_waits_for_prompt_delay},
+        {"restart_from_game_over_changes_wave_seed", test_restart_from_game_over_changes_wave_seed},
     };
 
     for (const auto& [name, test] : tests) {

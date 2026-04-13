@@ -1,6 +1,8 @@
 #pragma once
 
 #include "game_state.h"
+#include "menu_overlay.h"
+#include "viewport_layout.h"
 
 #include <GLFW/glfw3.h>
 
@@ -12,15 +14,9 @@
 #include <vector>
 
 enum class RenderMode : std::uint32_t {
-    Normal = 0,
+    Normal    = 0,
     StartMenu = 1,
-    Paused = 2,
-};
-
-struct MenuOverlayState {
-    const char* title = nullptr;
-    std::span<const char* const> items;
-    std::size_t selectedIndex = 0;
+    Paused    = 2,
 };
 
 class VulkanRenderer {
@@ -67,10 +63,27 @@ private:
         float sceneMix = 1.0f;
         float bloomStrength = 0.5f;
         float dimFactor = 1.0f;
+        float playableUvMinX = 0.0f;
+        float playableUvMinY = 0.0f;
+        float playableUvMaxX = 1.0f;
+        float playableUvMaxY = 1.0f;
+        float marginDim = 0.04f;
+        float marginTint = 0.08f;
     };
 
     struct StarPushConstants {
         float elapsedTimeSeconds = 0.0f;
+        float backgroundHalfWidth = GameState::kWorldHalfWidth;
+        float backgroundHalfHeight = GameState::kWorldHalfHeight;
+        float padding = 0.0f;
+    };
+
+    struct AsteroidPushConstants {
+        float shipPosition[2] = {0.0f, 0.0f};
+        float shipHeading = 0.0f;
+        float padding = 0.0f;
+        float worldHalfExtents[2] = {GameState::kWorldHalfWidth, GameState::kWorldHalfHeight};
+        float playableUvRect[4] = {0.0f, 0.0f, 1.0f, 1.0f};
     };
 
     struct ParticleVertex {
@@ -239,7 +252,7 @@ private:
     VkDeviceMemory starBufferMemory_ = VK_NULL_HANDLE;
     void* starBufferMapped_ = nullptr;
     std::size_t starCount_ = 0;
-    std::size_t maxStarCount_ = 240;
+    std::size_t maxStarCount_ = 512;
 
     VkBuffer particleBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory particleBufferMemory_ = VK_NULL_HANDLE;

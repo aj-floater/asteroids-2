@@ -9,6 +9,10 @@ layout(push_constant) uniform PushConstants {
     vec2 shipPosition;
     float shipHeading;
     vec2 worldHalfExtents;
+    float playableUvMinX;
+    float playableUvMinY;
+    float playableUvMaxX;
+    float playableUvMaxY;
 } pc;
 
 layout(location = 0) out vec2 fragLocalPosition;
@@ -22,6 +26,10 @@ void main() {
     fragBasis = inBasis;
 
     vec2 clipPoint = inPosition / pc.worldHalfExtents;
-    fragSceneUv = vec2(clipPoint.x * 0.5 + 0.5, (-clipPoint.y) * 0.5 + 0.5);
+    vec2 localSceneUv = vec2(clipPoint.x * 0.5 + 0.5, (-clipPoint.y) * 0.5 + 0.5);
+    fragSceneUv = vec2(
+        mix(pc.playableUvMinX, pc.playableUvMaxX, localSceneUv.x),
+        mix(pc.playableUvMinY, pc.playableUvMaxY, localSceneUv.y)
+    );
     gl_Position = vec4(clipPoint.x, -clipPoint.y, 0.0, 1.0);
 }
