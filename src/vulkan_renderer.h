@@ -11,6 +11,18 @@
 #include <string>
 #include <vector>
 
+enum class RenderMode : std::uint32_t {
+    Normal = 0,
+    StartMenu = 1,
+    Paused = 2,
+};
+
+struct MenuOverlayState {
+    const char* title = nullptr;
+    std::span<const char* const> items;
+    std::size_t selectedIndex = 0;
+};
+
 class VulkanRenderer {
 public:
     void initialize(GLFWwindow* window);
@@ -19,7 +31,9 @@ public:
         std::span<const EffectParticleRenderData> particles,
         std::span<const AsteroidRenderData> asteroids,
         const HudState& hudState,
-        float deltaTimeSeconds
+        float deltaTimeSeconds,
+        RenderMode renderMode = RenderMode::Normal,
+        const MenuOverlayState& menuOverlay = {}
     );
     void handle_resize();
     void shutdown();
@@ -47,6 +61,12 @@ private:
 
     struct BlurPushConstants {
         float texelOffset[2];
+    };
+
+    struct CompositePushConstants {
+        float sceneMix = 1.0f;
+        float bloomStrength = 0.5f;
+        float dimFactor = 1.0f;
     };
 
     struct StarPushConstants {
@@ -119,6 +139,8 @@ private:
     void create_asteroid_buffer();
     void create_hud_buffer();
     void update_hud_buffer(const HudState& hudState);
+    void create_menu_buffer();
+    void update_menu_buffer(const MenuOverlayState& menuOverlay);
     void create_command_buffers();
     void create_sync_objects();
 
@@ -139,7 +161,8 @@ private:
         const ShipState& shipState,
         std::span<const EffectParticleRenderData> particles,
         std::span<const AsteroidRenderData> asteroids,
-        const HudState& hudState
+        const HudState& hudState,
+        RenderMode renderMode
     );
 
     QueueFamilyIndices find_queue_families(VkPhysicalDevice device) const;
@@ -186,6 +209,7 @@ private:
     VkDescriptorSet shipDescriptorSet_ = VK_NULL_HANDLE;
     VkDescriptorSet asteroidDescriptorSet_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSet, 3> blurDescriptorSets_{};
+    VkDescriptorSet sceneBlurInputDescriptorSet_ = VK_NULL_HANDLE;
     VkDescriptorSet compositeDescriptorSet_ = VK_NULL_HANDLE;
     VkSampler linearSampler_ = VK_NULL_HANDLE;
 
@@ -205,6 +229,8 @@ private:
     VkPipeline compositePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout hudPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline hudPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout menuHudPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline menuHudPipeline_ = VK_NULL_HANDLE;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers_;
@@ -232,6 +258,12 @@ private:
     void* hudBufferMapped_ = nullptr;
     std::size_t hudVertexCount_ = 0;
     static constexpr std::size_t kMaxHudVertices = 4096;
+
+    VkBuffer menuBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory menuBufferMemory_ = VK_NULL_HANDLE;
+    void* menuBufferMapped_ = nullptr;
+    std::size_t menuVertexCount_ = 0;
+    static constexpr std::size_t kMaxMenuVertices = 4096;
 
     float elapsedTimeSeconds_ = 0.0f;
 

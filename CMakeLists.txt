@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
 find_package(Vulkan REQUIRED)
+find_package(Threads REQUIRED)
 find_package(glfw3 CONFIG QUIET)
 
 if(NOT TARGET glfw AND NOT TARGET glfw3::glfw)
@@ -168,6 +169,15 @@ add_custom_command(
   VERBATIM
 )
 
+add_custom_command(
+  OUTPUT "${ASTEROIDS_SHADER_OUTPUT_DIR}/menu_hud.frag.spv"
+  COMMAND "${SHADER_COMPILER}" ${SHADER_STAGE_FRAG_ARGS} -V
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders/menu_hud.frag"
+          -o "${ASTEROIDS_SHADER_OUTPUT_DIR}/menu_hud.frag.spv"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/menu_hud.frag"
+  VERBATIM
+)
+
 add_custom_target(asteroids_shaders ALL
   DEPENDS
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/ship.vert.spv"
@@ -185,12 +195,15 @@ add_custom_target(asteroids_shaders ALL
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/composite.frag.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.vert.spv"
     "${ASTEROIDS_SHADER_OUTPUT_DIR}/hud.frag.spv"
+    "${ASTEROIDS_SHADER_OUTPUT_DIR}/menu_hud.frag.spv"
 )
 
 add_executable(asteroids
+  src/audio_engine.cpp
   src/main.cpp
   src/app.cpp
   src/game_state.cpp
+  src/menu_asteroids.cpp
   src/vulkan_renderer.cpp
 )
 
@@ -202,11 +215,17 @@ target_compile_definitions(asteroids PRIVATE
 )
 
 target_include_directories(asteroids PRIVATE src)
+target_include_directories(asteroids SYSTEM PRIVATE third_party/miniaudio)
+
+set(ASTEROIDS_AUDIO_LIBS Threads::Threads ${CMAKE_DL_LIBS})
+if(UNIX AND NOT APPLE)
+  list(APPEND ASTEROIDS_AUDIO_LIBS m)
+endif()
 
 if(TARGET glfw)
-  target_link_libraries(asteroids PRIVATE glfw Vulkan::Vulkan)
+  target_link_libraries(asteroids PRIVATE glfw Vulkan::Vulkan ${ASTEROIDS_AUDIO_LIBS})
 elseif(TARGET glfw3::glfw)
-  target_link_libraries(asteroids PRIVATE glfw3::glfw Vulkan::Vulkan)
+  target_link_libraries(asteroids PRIVATE glfw3::glfw Vulkan::Vulkan ${ASTEROIDS_AUDIO_LIBS})
 else()
   message(FATAL_ERROR "Could not find a usable GLFW target.")
 endif()
@@ -218,6 +237,23 @@ else()
 endif()
 
 if(BUILD_TESTING)
+  add_executable(audio_engine_tests
+    tests/audio_engine_tests.cpp
+    src/audio_engine.cpp
+  )
+
+  target_include_directories(audio_engine_tests PRIVATE src)
+  target_include_directories(audio_engine_tests SYSTEM PRIVATE third_party/miniaudio)
+  target_link_libraries(audio_engine_tests PRIVATE ${ASTEROIDS_AUDIO_LIBS})
+
+  if(MSVC)
+    target_compile_options(audio_engine_tests PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(audio_engine_tests PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+
+  add_test(NAME audio_engine_tests COMMAND audio_engine_tests)
+
   add_executable(game_state_tests
     tests/game_state_tests.cpp
     src/game_state.cpp

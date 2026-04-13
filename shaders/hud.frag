@@ -12,8 +12,10 @@ void main() {
     }
 
     float emissiveStrength = fragParams.x;
+    float sceneAlphaScale = fragParams.y;
     vec3 emissiveColor = fragColor.rgb * fragColor.a * emissiveStrength;
+    float sceneAlpha = fragColor.a * sceneAlphaScale;
 
-    outSceneColor = fragColor;
+    outSceneColor = vec4(fragColor.rgb, sceneAlpha);
     outBrightColor = vec4(emissiveColor, 0.0);
 }

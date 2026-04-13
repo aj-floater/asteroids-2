@@ -229,6 +229,7 @@ void VulkanRenderer::initialize(GLFWwindow* window) {
     create_particle_buffer();
     create_asteroid_buffer();
     create_hud_buffer();
+    create_menu_buffer();
     create_command_buffers();
     create_sync_objects();
     update_descriptor_sets();
@@ -239,12 +240,15 @@ void VulkanRenderer::render(
     std::span<const EffectParticleRenderData> particles,
     std::span<const AsteroidRenderData> asteroids,
     const HudState& hudState,
-    float deltaTimeSeconds
+    float deltaTimeSeconds,
+    RenderMode renderMode,
+    const MenuOverlayState& menuOverlay
 ) {
     elapsedTimeSeconds_ += deltaTimeSeconds;
     update_particle_buffer(particles);
     update_asteroid_buffer(asteroids);
     update_hud_buffer(hudState);
+    update_menu_buffer(menuOverlay);
 
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE, UINT64_MAX);
 
@@ -274,7 +278,7 @@ void VulkanRenderer::render(
 
     vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
     vkResetCommandBuffer(commandBuffers_[currentFrame_], 0);
-    record_command_buffer(commandBuffers_[currentFrame_], imageIndex, shipState, particles, asteroids, hudState);
+    record_command_buffer(commandBuffers_[currentFrame_], imageIndex, shipState, particles, asteroids, hudState, renderMode);
 
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores_[currentFrame_]};
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -383,6 +387,21 @@ void VulkanRenderer::shutdown() {
     if (hudBufferMemory_ != VK_NULL_HANDLE) {
         vkFreeMemory(device_, hudBufferMemory_, nullptr);
         hudBufferMemory_ = VK_NULL_HANDLE;
+    }
+
+    if (menuBufferMapped_ != nullptr) {
+        vkUnmapMemory(device_, menuBufferMemory_);
+        menuBufferMapped_ = nullptr;
+    }
+
+    if (menuBuffer_ != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, menuBuffer_, nullptr);
+        menuBuffer_ = VK_NULL_HANDLE;
+    }
+
+    if (menuBufferMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, menuBufferMemory_, nullptr);
+        menuBufferMemory_ = VK_NULL_HANDLE;
     }
 
     if (descriptorPool_ != VK_NULL_HANDLE) {
@@ -857,6 +876,7 @@ void VulkanRenderer::create_pipelines() {
     const std::vector<char> compositeFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/composite.frag.spv");
     const std::vector<char> hudVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/hud.vert.spv");
     const std::vector<char> hudFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/hud.frag.spv");
+    const std::vector<char> menuHudFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/menu_hud.frag.spv");
 
     const VkShaderModule starVertModule = create_shader_module(starVertShaderCode);
     const VkShaderModule starFragModule = create_shader_module(starFragShaderCode);
@@ -873,6 +893,7 @@ void VulkanRenderer::create_pipelines() {
     const VkShaderModule compositeFragModule = create_shader_module(compositeFragShaderCode);
     const VkShaderModule hudVertModule = create_shader_module(hudVertShaderCode);
     const VkShaderModule hudFragModule = create_shader_module(hudFragShaderCode);
+    const VkShaderModule menuHudFragModule = create_shader_module(menuHudFragShaderCode);
 
     std::array<VkDynamicState, 2> dynamicStates = {
         VK_DYNAMIC_STATE_VIEWPORT,
@@ -1261,10 +1282,17 @@ void VulkanRenderer::create_pipelines() {
         colorBlending.attachmentCount = 1;
         colorBlending.pAttachments = &attachment;
 
+        VkPushConstantRange compositePushConstantRange{};
+        compositePushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        compositePushConstantRange.offset = 0;
+        compositePushConstantRange.size = sizeof(CompositePushConstants);
+
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &compositeDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &compositePushConstantRange;
 
         if (vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &compositePipelineLayout_) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create composite pipeline layout.");
@@ -1344,6 +1372,59 @@ void VulkanRenderer::create_pipelines() {
         }
     }
 
+    {
+        const VkVertexInputBindingDescription bindingDescription = HudVertex::binding_description();
+        const auto attributeDescriptions = HudVertex::attribute_descriptions();
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = {
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, hudVertModule, "main", nullptr},
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, menuHudFragModule, "main", nullptr},
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        const VkPipelineColorBlendAttachmentState attachment = alpha_blend_attachment();
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &attachment;
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+        if (vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &menuHudPipelineLayout_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create menu HUD pipeline layout.");
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = menuHudPipelineLayout_;
+        pipelineInfo.renderPass = compositeRenderPass_;
+
+        if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &menuHudPipeline_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create menu HUD graphics pipeline.");
+        }
+    }
+
+    vkDestroyShaderModule(device_, menuHudFragModule, nullptr);
     vkDestroyShaderModule(device_, hudFragModule, nullptr);
     vkDestroyShaderModule(device_, hudVertModule, nullptr);
     vkDestroyShaderModule(device_, starFragModule, nullptr);
@@ -1444,11 +1525,11 @@ void VulkanRenderer::create_framebuffers() {
 void VulkanRenderer::create_descriptor_pool() {
     std::array<VkDescriptorPoolSize, 1> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = 7;
+    poolSizes[0].descriptorCount = 8;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 6;
+    poolInfo.maxSets = 7;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
 
@@ -1501,6 +1582,17 @@ void VulkanRenderer::create_descriptor_sets() {
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         allocInfo.descriptorPool = descriptorPool_;
         allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &blurDescriptorSetLayout_;
+        if (vkAllocateDescriptorSets(device_, &allocInfo, &sceneBlurInputDescriptorSet_) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate scene blur input descriptor set.");
+        }
+    }
+
+    {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool_;
+        allocInfo.descriptorSetCount = 1;
         allocInfo.pSetLayouts = &compositeDescriptorSetLayout_;
         if (vkAllocateDescriptorSets(device_, &allocInfo, &compositeDescriptorSet_) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate composite descriptor set.");
@@ -1536,6 +1628,16 @@ void VulkanRenderer::update_descriptor_sets() {
     asteroidWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     asteroidWrite.pImageInfo = &asteroidImageInfo;
     vkUpdateDescriptorSets(device_, 1, &asteroidWrite, 0, nullptr);
+
+    VkDescriptorImageInfo sceneBlurImageInfo = make_image_info(sceneTarget_.view);
+    VkWriteDescriptorSet sceneBlurWrite{};
+    sceneBlurWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    sceneBlurWrite.dstSet = sceneBlurInputDescriptorSet_;
+    sceneBlurWrite.dstBinding = 0;
+    sceneBlurWrite.descriptorCount = 1;
+    sceneBlurWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sceneBlurWrite.pImageInfo = &sceneBlurImageInfo;
+    vkUpdateDescriptorSets(device_, 1, &sceneBlurWrite, 0, nullptr);
 
     const std::array<VkImageView, 3> blurViews = {brightTarget_.view, blurTargets_[0].view, blurTargets_[1].view};
     for (size_t index = 0; index < blurDescriptorSets_.size(); ++index) {
@@ -1706,6 +1808,8 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
     constexpr float hh = dh * 0.5f;
     constexpr float kHudEdgePaddingX = 0.08f;
     constexpr float kHudEdgePaddingY = 0.08f;
+    constexpr float kHudLivesShipScale = 0.0056f;
+    constexpr float kHudLivesShipSpacing = 0.046f;
     constexpr std::array<Vec2, 6> kShipSilhouettePoints = {{
         {4.0f, 0.0f},
         {-4.0f, 4.0f},
@@ -1736,7 +1840,7 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         };
     };
 
-    auto make_vertex = [&](const Vec2& position, const ColorRgb& color, float alpha, float emissiveStrength) {
+    auto make_vertex = [&](const Vec2& position, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
         HudVertex vertex{};
         vertex.position[0] = position.x;
         vertex.position[1] = position.y;
@@ -1745,23 +1849,24 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         vertex.color[2] = color.b;
         vertex.color[3] = alpha;
         vertex.params[0] = emissiveStrength;
+        vertex.params[1] = sceneAlphaScale;
         return vertex;
     };
 
-    auto add_triangle = [&](const Vec2& a, const Vec2& b, const Vec2& c, const ColorRgb& color, float alpha, float emissiveStrength) {
-        HudVertex v0 = make_vertex(a, color, alpha, emissiveStrength);
-        HudVertex v1 = make_vertex(b, color, alpha, emissiveStrength);
-        HudVertex v2 = make_vertex(c, color, alpha, emissiveStrength);
+    auto add_triangle = [&](const Vec2& a, const Vec2& b, const Vec2& c, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        HudVertex v0 = make_vertex(a, color, alpha, emissiveStrength, sceneAlphaScale);
+        HudVertex v1 = make_vertex(b, color, alpha, emissiveStrength, sceneAlphaScale);
+        HudVertex v2 = make_vertex(c, color, alpha, emissiveStrength, sceneAlphaScale);
         vertices.push_back(v0);
         vertices.push_back(v1);
         vertices.push_back(v2);
     };
 
-    auto add_rect = [&](float x0, float y0, float x1, float y1, const ColorRgb& color, float alpha, float emissiveStrength) {
-        const HudVertex v0 = make_vertex({x0, y0}, color, alpha, emissiveStrength);
-        const HudVertex v1 = make_vertex({x1, y0}, color, alpha, emissiveStrength);
-        const HudVertex v2 = make_vertex({x1, y1}, color, alpha, emissiveStrength);
-        const HudVertex v3 = make_vertex({x0, y1}, color, alpha, emissiveStrength);
+    auto add_rect = [&](float x0, float y0, float x1, float y1, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        const HudVertex v0 = make_vertex({x0, y0}, color, alpha, emissiveStrength, sceneAlphaScale);
+        const HudVertex v1 = make_vertex({x1, y0}, color, alpha, emissiveStrength, sceneAlphaScale);
+        const HudVertex v2 = make_vertex({x1, y1}, color, alpha, emissiveStrength, sceneAlphaScale);
+        const HudVertex v3 = make_vertex({x0, y1}, color, alpha, emissiveStrength, sceneAlphaScale);
         vertices.push_back(v0);
         vertices.push_back(v1);
         vertices.push_back(v2);
@@ -1770,7 +1875,7 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         vertices.push_back(v3);
     };
 
-    auto add_ship = [&](float centerX, float centerY, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+    auto add_ship = [&](float centerX, float centerY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
         for (std::size_t vertexIndex = 0; vertexIndex < kShipSilhouettePoints.size(); vertexIndex += 3) {
             const Vec2 a = {
                 centerX + kShipSilhouettePoints[vertexIndex + 0].x * scale,
@@ -1784,11 +1889,11 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
                 centerX + kShipSilhouettePoints[vertexIndex + 2].x * scale,
                 centerY + kShipSilhouettePoints[vertexIndex + 2].y * scale,
             };
-            add_triangle(a, b, c, color, alpha, emissiveStrength);
+            add_triangle(a, b, c, color, alpha, emissiveStrength, sceneAlphaScale);
         }
     };
 
-    auto add_digit = [&](std::uint32_t digit, float originX, float originY, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+    auto add_digit = [&](std::uint32_t digit, float originX, float originY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
         if (digit > 9) {
             digit = 0;
         }
@@ -1803,13 +1908,14 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
                     originY + rect.y1 * scale,
                     color,
                     alpha,
-                    emissiveStrength
+                    emissiveStrength,
+                    sceneAlphaScale
                 );
             }
         }
     };
 
-    auto add_number = [&](std::uint32_t number, float rightX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength) {
+    auto add_number = [&](std::uint32_t number, float rightX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
         const float digitWidth = dw * scale;
         const float spacing = 0.3f * scale;
 
@@ -1829,20 +1935,153 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
         float x = rightX - digitWidth;
         const float bottomY = topY - dh * scale;
         for (int i = 0; i < digitCount; ++i) {
-            add_digit(digits[i], x, bottomY, scale, color, alpha, emissiveStrength);
+            add_digit(digits[i], x, bottomY, scale, color, alpha, emissiveStrength, sceneAlphaScale);
             x -= digitWidth + spacing;
         }
     };
 
+    auto add_plus_glyph = [&](float originX, float originY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) -> float {
+        const float plusWidth = 0.72f * scale;
+        const float strokeWidth = sw * scale * 0.88f;
+        const float centerX = originX + plusWidth * 0.5f;
+        const float centerY = originY + hh * scale;
+        add_rect(
+            centerX - strokeWidth * 0.5f,
+            originY + dh * scale * 0.2f,
+            centerX + strokeWidth * 0.5f,
+            originY + dh * scale * 0.8f,
+            color,
+            alpha,
+            emissiveStrength,
+            sceneAlphaScale
+        );
+        add_rect(
+            originX,
+            centerY - strokeWidth * 0.5f,
+            originX + plusWidth,
+            centerY + strokeWidth * 0.5f,
+            color,
+            alpha,
+            emissiveStrength,
+            sceneAlphaScale
+        );
+        return plusWidth;
+    };
+
+    auto count_digits = [](std::uint32_t number) {
+        int digitCount = 0;
+        if (number == 0) {
+            return 1;
+        }
+        while (number > 0 && digitCount < 10) {
+            number /= 10;
+            ++digitCount;
+        }
+        return digitCount;
+    };
+
+    auto measure_number_width = [&](std::uint32_t number, float scale) {
+        const float digitWidth = dw * scale;
+        const float spacing = 0.3f * scale;
+        const int digitCount = count_digits(number);
+        return digitWidth * static_cast<float>(digitCount) + spacing * static_cast<float>(std::max(0, digitCount - 1));
+    };
+
+    auto add_number_left_aligned = [&](std::uint32_t number, float leftX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        const float digitWidth = dw * scale;
+        const float spacing = 0.3f * scale;
+
+        std::array<std::uint32_t, 10> digits{};
+        int digitCount = 0;
+        if (number == 0) {
+            digits[0] = 0;
+            digitCount = 1;
+        } else {
+            std::uint32_t remaining = number;
+            while (remaining > 0 && digitCount < 10) {
+                digits[digitCount++] = remaining % 10;
+                remaining /= 10;
+            }
+        }
+
+        float x = leftX;
+        const float bottomY = topY - dh * scale;
+        for (int index = digitCount - 1; index >= 0; --index) {
+            add_digit(digits[index], x, bottomY, scale, color, alpha, emissiveStrength, sceneAlphaScale);
+            x += digitWidth + spacing;
+        }
+    };
+
+    auto add_score_delta_popup = [&](std::uint32_t deltaValue, float rightX, float topY, float scale, const ColorRgb& color, float alpha, float emissiveStrength, float sceneAlphaScale = 1.0f) {
+        const float plusWidth = 0.72f * scale;
+        const float plusGap = 0.18f * scale;
+        const float popupWidth = plusWidth + plusGap + measure_number_width(deltaValue, scale);
+        const float popupLeftX = rightX - popupWidth;
+        add_plus_glyph(
+            popupLeftX,
+            topY - dh * scale,
+            scale,
+            color,
+            alpha,
+            emissiveStrength,
+            sceneAlphaScale
+        );
+        add_number_left_aligned(
+            deltaValue,
+            popupLeftX + plusWidth + plusGap,
+            topY,
+            scale,
+            color,
+            alpha,
+            emissiveStrength,
+            sceneAlphaScale
+        );
+    };
+
     {
+        const ScoreFeedbackTuning& scoreFeedback = kScoreFeedbackTuning;
         const float flashEnergy = std::max(hudState.scoreFlashEnergy, 0.0f);
-        const float flashMix = 1.0f - std::exp(-flashEnergy);
+        const float flashMix = 1.0f - std::exp(-flashEnergy * scoreFeedback.scoreTintResponse);
+        const float milestoneEnergy = std::max(hudState.scoreMilestoneFlashEnergy, 0.0f);
+        const float milestoneMix = 1.0f - std::exp(-milestoneEnergy * scoreFeedback.milestoneTintResponse);
         const float scoreScale = 0.026f;
         const float topY = 1.0f - kHudEdgePaddingY;
         const float rightX = 1.0f - kHudEdgePaddingX;
-        const ColorRgb scoreBaseColor{0.86f, 0.88f, 0.96f};
-        const ColorRgb scoreCoreColor = mix_color(scoreBaseColor, hudState.laserColor, flashMix);
-        const float scoreEmission = 2.6f + flashEnergy * 3.4f;
+        const ColorRgb scoreBaseColor = scoreFeedback.baseColor;
+        const ColorRgb scoreFlashColor = mix_color(scoreBaseColor, hudState.laserColor, flashMix);
+        const ColorRgb scoreCoreColor = mix_color(scoreFlashColor, hudState.scoreMilestoneColor, milestoneMix);
+        const float scoreEmission =
+            scoreFeedback.baseEmission +
+            flashEnergy * scoreFeedback.scoreEmissionPerEnergy +
+            milestoneEnergy * scoreFeedback.milestoneEmissionPerEnergy;
+        const float glowEnergy =
+            flashEnergy * scoreFeedback.scoreGlowEnergyWeight +
+            milestoneEnergy * scoreFeedback.milestoneGlowEnergyWeight;
+        const float glowMix = 1.0f - std::exp(-glowEnergy);
+
+        if (glowMix > 0.001f) {
+            add_number(
+                hudState.score,
+                rightX,
+                topY,
+                scoreScale * scoreFeedback.outerGlow.scaleMultiplier,
+                scoreCoreColor,
+                scoreFeedback.outerGlow.bloomAlpha * glowMix,
+                scoreEmission * scoreFeedback.outerGlow.emissionScale * glowMix,
+                scoreFeedback.outerGlow.sceneAlphaScale
+            );
+            add_number(
+                hudState.score,
+                rightX,
+                topY,
+                scoreScale * scoreFeedback.innerGlow.scaleMultiplier,
+                scoreCoreColor,
+                scoreFeedback.innerGlow.bloomAlpha * glowMix,
+                scoreEmission * scoreFeedback.innerGlow.emissionScale * glowMix,
+                scoreFeedback.innerGlow.sceneAlphaScale
+            );
+        }
+
         add_number(
             hudState.score,
             rightX,
@@ -1852,14 +2091,62 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
             0.98f,
             scoreEmission
         );
+
+        if (hudState.recentScorePopupValue > 0 && hudState.recentScorePopupTimer > 0.0f) {
+            const ScorePopupTuning& popup = scoreFeedback.popup;
+            const float normalizedRemaining = std::clamp(
+                hudState.recentScorePopupTimer / popup.lifetimeSeconds,
+                0.0f,
+                1.0f
+            );
+            const float popupAlpha = popup.baseAlpha * (1.0f - std::pow(1.0f - normalizedRemaining, popup.fadeExponent));
+            const float popupGlowMix = 1.0f - std::exp(-popupAlpha * popup.glowResponse);
+            const float riseProgress = 1.0f - normalizedRemaining;
+            const float popupTopY =
+                topY - dh * scoreScale - popup.verticalGap + popup.riseDistance * riseProgress;
+            const float popupEmission = popup.baseEmission * (0.65f + popupAlpha * 0.35f);
+
+            if (popupGlowMix > 0.001f) {
+                add_score_delta_popup(
+                    hudState.recentScorePopupValue,
+                    rightX,
+                    popupTopY,
+                    popup.scale * popup.outerGlow.scaleMultiplier,
+                    hudState.laserColor,
+                    popup.outerGlow.bloomAlpha * popupGlowMix,
+                    popupEmission * popup.outerGlow.emissionScale * popupGlowMix,
+                    popup.outerGlow.sceneAlphaScale
+                );
+                add_score_delta_popup(
+                    hudState.recentScorePopupValue,
+                    rightX,
+                    popupTopY,
+                    popup.scale * popup.innerGlow.scaleMultiplier,
+                    hudState.laserColor,
+                    popup.innerGlow.bloomAlpha * popupGlowMix,
+                    popupEmission * popup.innerGlow.emissionScale * popupGlowMix,
+                    popup.innerGlow.sceneAlphaScale
+                );
+            }
+
+            add_score_delta_popup(
+                hudState.recentScorePopupValue,
+                rightX,
+                popupTopY,
+                popup.scale,
+                hudState.laserColor,
+                popupAlpha,
+                popupEmission
+            );
+        }
     }
 
     {
         const std::uint32_t displayLives = (hudState.lives > 0) ? hudState.lives - 1 : 0;
-        const float shipScale = 0.0048f;
+        const float shipScale = kHudLivesShipScale;
         const float startX = -1.0f + kHudEdgePaddingX + 4.0f * shipScale;
         const float shipY = 1.0f - kHudEdgePaddingY - 4.0f * shipScale;
-        const float shipSpacing = 0.040f;
+        const float shipSpacing = kHudLivesShipSpacing;
         const ColorRgb shipColor{0.541f, 0.082f, 0.220f};
         const float livesEmission = 0.9f;
 
@@ -1951,6 +2238,220 @@ void VulkanRenderer::update_hud_buffer(const HudState& hudState) {
     }
 }
 
+void VulkanRenderer::create_menu_buffer() {
+    const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(kMaxMenuVertices * sizeof(HudVertex));
+    create_buffer(
+        bufferSize,
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        menuBuffer_,
+        menuBufferMemory_
+    );
+
+    if (vkMapMemory(device_, menuBufferMemory_, 0, bufferSize, 0, &menuBufferMapped_) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to map menu vertex buffer.");
+    }
+}
+
+void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
+    std::vector<HudVertex> vertices;
+    vertices.reserve(kMaxMenuVertices);
+
+    auto make_vertex = [](const Vec2& position, const ColorRgb& color, float alpha, float emissiveStrength) {
+        HudVertex vertex{};
+        vertex.position[0] = position.x;
+        vertex.position[1] = position.y;
+        vertex.color[0] = color.r;
+        vertex.color[1] = color.g;
+        vertex.color[2] = color.b;
+        vertex.color[3] = alpha;
+        vertex.params[0] = emissiveStrength;
+        return vertex;
+    };
+
+    auto add_rect = [&](float x0, float y0, float x1, float y1, const ColorRgb& color, float alpha, float emissiveStrength) {
+        const HudVertex v0 = make_vertex({x0, y0}, color, alpha, emissiveStrength);
+        const HudVertex v1 = make_vertex({x1, y0}, color, alpha, emissiveStrength);
+        const HudVertex v2 = make_vertex({x1, y1}, color, alpha, emissiveStrength);
+        const HudVertex v3 = make_vertex({x0, y1}, color, alpha, emissiveStrength);
+        vertices.push_back(v0);
+        vertices.push_back(v1);
+        vertices.push_back(v2);
+        vertices.push_back(v0);
+        vertices.push_back(v2);
+        vertices.push_back(v3);
+    };
+
+    struct LetterDef {
+        char ch;
+        float width;
+    };
+
+    constexpr float lw = 0.18f;
+
+    auto draw_letter = [&](char ch, float cx, float cy, float scale, const ColorRgb& color, float alpha, float emissiveStrength) -> float {
+        auto lr = [&](float lx0, float ly0, float lx1, float ly1) {
+            add_rect(
+                cx + lx0 * scale, cy + ly0 * scale,
+                cx + lx1 * scale, cy + ly1 * scale,
+                color, alpha, emissiveStrength
+            );
+        };
+
+        float letterWidth = 1.0f;
+
+        switch (ch) {
+            case 'A':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(1.0f - lw, 0.0f, 1.0f, 1.8f);
+                lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+                lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                break;
+            case 'D':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 1.8f - lw, 0.75f, 1.8f);
+                lr(lw, 0.0f, 0.75f, lw);
+                lr(0.75f, lw, 0.75f + lw, 0.9f - lw * 0.25f);
+                lr(0.75f, 0.9f + lw * 0.25f, 0.75f + lw, 1.8f - lw);
+                letterWidth = 0.75f + lw;
+                break;
+            case 'E':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 1.8f - lw, 1.0f, 1.8f);
+                lr(lw, 0.9f - lw * 0.5f, 0.8f, 0.9f + lw * 0.5f);
+                lr(lw, 0.0f, 1.0f, lw);
+                break;
+            case 'G':
+                lr(lw, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.0f, lw, lw, 1.8f - lw);
+                lr(lw, 0.0f, 1.0f - lw, lw);
+                lr(1.0f - lw, 0.0f, 1.0f, 0.9f + lw * 0.5f);
+                lr(0.5f, 0.9f - lw * 0.5f, 1.0f, 0.9f + lw * 0.5f);
+                break;
+            case 'I':
+                lr(0.5f - lw * 0.5f, 0.0f, 0.5f + lw * 0.5f, 1.8f);
+                lr(0.0f, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.0f, 0.0f, 1.0f, lw);
+                break;
+            case 'M':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(1.2f - lw, 0.0f, 1.2f, 1.8f);
+                lr(lw, 1.8f - lw, 0.6f, 1.8f);
+                lr(0.6f, 1.8f - lw, 1.2f - lw, 1.8f);
+                lr(0.6f - lw * 0.5f, 0.9f, 0.6f + lw * 0.5f, 1.8f - lw);
+                letterWidth = 1.2f;
+                break;
+            case 'N':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(1.0f - lw, 0.0f, 1.0f, 1.8f);
+                lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+                break;
+            case 'O':
+                lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+                lr(0.0f, lw, lw, 1.8f - lw);
+                lr(1.0f - lw, lw, 1.0f, 1.8f - lw);
+                lr(lw, 0.0f, 1.0f - lw, lw);
+                break;
+            case 'P':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+                lr(1.0f - lw, 0.9f, 1.0f, 1.8f - lw);
+                lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                break;
+            case 'Q':
+                lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+                lr(0.0f, lw, lw, 1.8f - lw);
+                lr(1.0f - lw, lw, 1.0f, 1.8f - lw);
+                lr(lw, 0.0f, 1.0f - lw, lw);
+                lr(0.6f, 0.0f, 1.1f, lw);
+                letterWidth = 1.1f;
+                break;
+            case 'R':
+                lr(0.0f, 0.0f, lw, 1.8f);
+                lr(lw, 1.8f - lw, 1.0f - lw, 1.8f);
+                lr(1.0f - lw, 0.9f, 1.0f, 1.8f - lw);
+                lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                lr(0.5f, 0.0f, 0.5f + lw, 0.9f - lw * 0.5f);
+                lr(0.5f + lw, 0.0f, 1.0f, lw);
+                break;
+            case 'S':
+                lr(lw, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.0f, 0.9f + lw * 0.5f, lw, 1.8f - lw);
+                lr(lw, 0.9f - lw * 0.5f, 1.0f - lw, 0.9f + lw * 0.5f);
+                lr(1.0f - lw, lw, 1.0f, 0.9f - lw * 0.5f);
+                lr(0.0f, 0.0f, 1.0f - lw, lw);
+                break;
+            case 'T':
+                lr(0.0f, 1.8f - lw, 1.0f, 1.8f);
+                lr(0.5f - lw * 0.5f, 0.0f, 0.5f + lw * 0.5f, 1.8f - lw);
+                break;
+            case 'U':
+                lr(0.0f, lw, lw, 1.8f);
+                lr(1.0f - lw, lw, 1.0f, 1.8f);
+                lr(lw, 0.0f, 1.0f - lw, lw);
+                break;
+            case ' ':
+                letterWidth = 0.5f;
+                break;
+            default:
+                break;
+        }
+        return letterWidth * scale;
+    };
+
+    auto measure_text = [&](const char* text, float scale, float spacing) -> float {
+        float width = 0.0f;
+        for (const char* p = text; *p != '\0'; ++p) {
+            if (p != text) width += spacing;
+            // Use same letter widths as draw_letter
+            float letterWidth = 1.0f;
+            switch (*p) {
+                case 'D': letterWidth = 0.75f + lw; break;
+                case 'M': letterWidth = 1.2f; break;
+                case 'Q': letterWidth = 1.1f; break;
+                case ' ': letterWidth = 0.5f; break;
+                default: break;
+            }
+            width += letterWidth * scale;
+        }
+        return width;
+    };
+
+    auto draw_text = [&](const char* text, float centerX, float centerY, float scale, float spacing, const ColorRgb& color, float alpha, float emissiveStrength) {
+        const float totalWidth = measure_text(text, scale, spacing);
+        float x = centerX - totalWidth * 0.5f;
+        for (const char* p = text; *p != '\0'; ++p) {
+            float w = draw_letter(*p, x, centerY, scale, color, alpha, emissiveStrength);
+            x += w + spacing;
+        }
+    };
+
+    if (menuOverlay.title != nullptr) {
+        const ColorRgb titleColor{0.86f, 0.88f, 0.96f};
+        const float titleScale = 0.055f;
+        const float titleSpacing = 0.3f * titleScale;
+        const float titleEmission = 3.0f;
+        draw_text(menuOverlay.title, 0.0f, 0.25f, titleScale, titleSpacing, titleColor, 0.98f, titleEmission);
+    }
+
+    for (std::size_t i = 0; i < menuOverlay.items.size(); ++i) {
+        const bool selected = (i == menuOverlay.selectedIndex);
+        const ColorRgb itemColor = selected
+            ? ColorRgb{0.96f, 0.77f, 0.18f}
+            : ColorRgb{0.55f, 0.56f, 0.62f};
+        const float itemEmission = selected ? 3.5f : 1.2f;
+        const float itemScale = 0.032f;
+        const float itemSpacing = 0.3f * itemScale;
+        const float itemY = -0.05f - static_cast<float>(i) * 0.14f;
+        draw_text(menuOverlay.items[i], 0.0f, itemY, itemScale, itemSpacing, itemColor, 0.98f, itemEmission);
+    }
+
+    menuVertexCount_ = std::min(vertices.size(), kMaxMenuVertices);
+    if (menuVertexCount_ > 0) {
+        std::memcpy(menuBufferMapped_, vertices.data(), menuVertexCount_ * sizeof(HudVertex));
+    }
+}
+
 void VulkanRenderer::create_command_buffers() {
     commandBuffers_.resize(kMaxFramesInFlight);
 
@@ -2000,6 +2501,14 @@ void VulkanRenderer::cleanup_swapchain() {
         destroy_offscreen_target(target);
     }
 
+    if (menuHudPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, menuHudPipeline_, nullptr);
+        menuHudPipeline_ = VK_NULL_HANDLE;
+    }
+    if (menuHudPipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, menuHudPipelineLayout_, nullptr);
+        menuHudPipelineLayout_ = VK_NULL_HANDLE;
+    }
     if (hudPipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, hudPipeline_, nullptr);
         hudPipeline_ = VK_NULL_HANDLE;
@@ -2318,7 +2827,8 @@ void VulkanRenderer::record_command_buffer(
     const ShipState& shipState,
     std::span<const EffectParticleRenderData> particles,
     std::span<const AsteroidRenderData> asteroids,
-    const HudState& hudState
+    const HudState& hudState,
+    RenderMode renderMode
 ) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2339,6 +2849,8 @@ void VulkanRenderer::record_command_buffer(
     scissor.offset = {0, 0};
     scissor.extent = swapchainExtent_;
 
+    const bool skipLightPasses = (renderMode == RenderMode::StartMenu);
+
     {
         VkClearValue clearColor{};
         clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -2354,7 +2866,7 @@ void VulkanRenderer::record_command_buffer(
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        if (!particles.empty()) {
+        if (!skipLightPasses && !particles.empty()) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleLightPipeline_);
@@ -2380,19 +2892,21 @@ void VulkanRenderer::record_command_buffer(
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        const std::size_t foregroundParticleCount = particles.size() - backgroundParticleCount_;
-        if (foregroundParticleCount > 0) {
-            VkBuffer vertexBuffers[] = {particleBuffer_};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleLightPipeline_);
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdDraw(
-                commandBuffer,
-                6,
-                static_cast<uint32_t>(foregroundParticleCount),
-                0,
-                static_cast<uint32_t>(backgroundParticleCount_)
-            );
+        if (!skipLightPasses) {
+            const std::size_t foregroundParticleCount = particles.size() - backgroundParticleCount_;
+            if (foregroundParticleCount > 0) {
+                VkBuffer vertexBuffers[] = {particleBuffer_};
+                VkDeviceSize offsets[] = {0};
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleLightPipeline_);
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+                vkCmdDraw(
+                    commandBuffer,
+                    6,
+                    static_cast<uint32_t>(foregroundParticleCount),
+                    0,
+                    static_cast<uint32_t>(backgroundParticleCount_)
+                );
+            }
         }
         vkCmdEndRenderPass(commandBuffer);
         transition_image_to_shader_read(commandBuffer, asteroidLightTarget_.image);
@@ -2435,7 +2949,7 @@ void VulkanRenderer::record_command_buffer(
             vkCmdDraw(commandBuffer, 4, static_cast<uint32_t>(starCount_), 0, 0);
         }
 
-        if (!particles.empty() && backgroundParticleCount_ > 0) {
+        if (renderMode != RenderMode::StartMenu && !particles.empty() && backgroundParticleCount_ > 0) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleScenePipeline_);
@@ -2474,7 +2988,7 @@ void VulkanRenderer::record_command_buffer(
             vkCmdDraw(commandBuffer, static_cast<uint32_t>(asteroidVertexCount_), 1, 0, 0);
         }
 
-        if (!particles.empty()) {
+        if (renderMode != RenderMode::StartMenu && !particles.empty()) {
             VkBuffer vertexBuffers[] = {particleBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particleScenePipeline_);
@@ -2492,7 +3006,7 @@ void VulkanRenderer::record_command_buffer(
         }
 
         {
-            bool drawShip = hudState.shipVisible;
+            bool drawShip = hudState.shipVisible && renderMode != RenderMode::StartMenu;
             if (drawShip && hudState.shipFlashing) {
                 drawShip = std::fmod(elapsedTimeSeconds_ * kInvulnerabilityFlashHz, 1.0f) < 0.5f;
             }
@@ -2529,7 +3043,7 @@ void VulkanRenderer::record_command_buffer(
             }
         }
 
-        if (hudVertexCount_ > 0) {
+        if (renderMode != RenderMode::StartMenu && hudVertexCount_ > 0) {
             VkBuffer vertexBuffers[] = {hudBuffer_};
             VkDeviceSize offsets[] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, hudPipeline_);
@@ -2541,18 +3055,16 @@ void VulkanRenderer::record_command_buffer(
         transition_image_to_shader_read(commandBuffer, brightTarget_.image);
     }
 
-    std::array<VkDescriptorSet, 3> blurSets = {
-        blurDescriptorSets_[0],
-        blurDescriptorSets_[1],
-        blurDescriptorSets_[2],
-    };
+    const VkDescriptorSet blurFirstPassInput = (renderMode == RenderMode::Paused)
+        ? sceneBlurInputDescriptorSet_
+        : blurDescriptorSets_[0];
 
     for (int passIndex = 0; passIndex < kBloomPassCount; ++passIndex) {
         const bool horizontal = (passIndex % 2) == 0;
         OffscreenTarget& outputTarget = horizontal ? blurTargets_[0] : blurTargets_[1];
         const VkDescriptorSet inputSet = (passIndex == 0)
-            ? blurSets[0]
-            : (horizontal ? blurSets[2] : blurSets[1]);
+            ? blurFirstPassInput
+            : (horizontal ? blurDescriptorSets_[2] : blurDescriptorSets_[1]);
 
         VkClearValue clearColor{};
         clearColor.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -2612,7 +3124,29 @@ void VulkanRenderer::record_command_buffer(
             0,
             nullptr
         );
+        CompositePushConstants compositePC{};
+        if (renderMode == RenderMode::Paused) {
+            compositePC.sceneMix = 0.0f;
+            compositePC.bloomStrength = 1.0f;
+            compositePC.dimFactor = 0.45f;
+        }
+        vkCmdPushConstants(
+            commandBuffer,
+            compositePipelineLayout_,
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(CompositePushConstants),
+            &compositePC
+        );
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+        if (menuVertexCount_ > 0) {
+            VkBuffer vertexBuffers[] = {menuBuffer_};
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, menuHudPipeline_);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            vkCmdDraw(commandBuffer, static_cast<uint32_t>(menuVertexCount_), 1, 0, 0);
+        }
 
         vkCmdEndRenderPass(commandBuffer);
     }
