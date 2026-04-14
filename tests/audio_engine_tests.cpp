@@ -488,6 +488,32 @@ void test_score_combo_tick_event_emits_audio_when_idle() {
     expect(max_abs_sample(output) > 0.006f, "combo tick should produce an audible one-shot");
 }
 
+void test_higher_score_combo_tick_scalar_increases_total_energy() {
+    ProceduralAudioMixer lowMixer;
+    ProceduralAudioMixer highMixer;
+    std::vector<float> lowOutput(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+    std::vector<float> highOutput(8192 * ProceduralAudioMixer::kChannelCount, 0.0f);
+
+    AudioFrameState lowFrame;
+    lowFrame.eventCount = 1;
+    lowFrame.events[0].type = AudioEventType::ScoreComboTick;
+    lowFrame.events[0].scalar = 1.1f;
+    lowMixer.submit_audio_frame(lowFrame);
+    lowMixer.mix(lowOutput.data(), 8192);
+
+    AudioFrameState highFrame;
+    highFrame.eventCount = 1;
+    highFrame.events[0].type = AudioEventType::ScoreComboTick;
+    highFrame.events[0].scalar = 3.5f;
+    highMixer.submit_audio_frame(highFrame);
+    highMixer.mix(highOutput.data(), 8192);
+
+    expect(
+        total_abs_sample(highOutput) > total_abs_sample(lowOutput) * 1.45f,
+        "deeper combo ticks should carry clearly more total energy than shallow ones"
+    );
+}
+
 void test_menu_hover_event_emits_audio_when_idle() {
     ProceduralAudioMixer mixer;
     std::vector<float> output(4096 * ProceduralAudioMixer::kChannelCount, 0.0f);
@@ -620,6 +646,7 @@ int main() {
         {"higher_10000_milestone_scalar_increases_total_energy", test_higher_10000_milestone_scalar_increases_total_energy},
         {"10000_milestone_is_bigger_than_5000_at_same_scalar", test_10000_milestone_is_bigger_than_5000_at_same_scalar},
         {"score_combo_tick_event_emits_audio_when_idle", test_score_combo_tick_event_emits_audio_when_idle},
+        {"higher_score_combo_tick_scalar_increases_total_energy", test_higher_score_combo_tick_scalar_increases_total_energy},
         {"menu_hover_event_emits_audio_when_idle", test_menu_hover_event_emits_audio_when_idle},
         {"menu_select_event_emits_audio_when_idle", test_menu_select_event_emits_audio_when_idle},
         {"menu_select_carries_more_energy_than_hover", test_menu_select_carries_more_energy_than_hover},

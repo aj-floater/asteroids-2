@@ -38,7 +38,6 @@ constexpr float kRespawnSafeRadius = 20.0f;
 constexpr std::uint32_t kInitialLives = 3;
 constexpr std::uint32_t kScoreMilestoneStep = 5000;
 constexpr std::uint32_t kMajorScoreMilestoneStep = 10000;
-constexpr std::uint32_t kExtraLifeThreshold = 10000;
 constexpr std::uint32_t kScoreLarge = 20;
 constexpr std::uint32_t kScoreMedium = 50;
 constexpr std::uint32_t kScoreSmall = 100;
@@ -141,6 +140,17 @@ struct SegmentIntersection {
     float t = 0.0f;
     Vec2 point{};
     Vec2 normal{};
+};
+
+struct CollisionWarningCandidate {
+    Vec2 relativePosition{};
+    Vec2 relativeVelocity{};
+    float impactRadius = 0.0f;
+    float distanceSquared = 0.0f;
+    float relativeSpeedSquared = 0.0f;
+    float approach = 0.0f;
+    float surfaceDistance = 0.0f;
+    float approximateIntensity = 0.0f;
 };
 
 float distance_squared_to_segment(const Vec2& point, const Vec2& start, const Vec2& end) {
@@ -413,6 +423,81 @@ std::optional<SegmentIntersection> segment_intersection(
         .point = segmentStart + segmentDelta * std::clamp(t, 0.0f, 1.0f),
         .normal = normal,
     };
+}
+
+float approximate_collision_warning_intensity(
+    float distance,
+    float surfaceDistance,
+    float approach
+) {
+    if (distance <= kCollisionEpsilon) {
+        return 1.0f;
+    }
+
+    const float radialClosingSpeed = -approach / distance;
+    if (radialClosingSpeed <= kCollisionEpsilon) {
+        return 0.0f;
+    }
+
+    const float timeToImpactProxy = surfaceDistance / radialClosingSpeed;
+    const float timeFactor =
+        1.0f - std::clamp(timeToImpactProxy / kCollisionWarningLeadTimeSeconds, 0.0f, 1.0f);
+    const float distanceFactor =
+        1.0f - std::clamp(surfaceDistance / kCollisionWarningRange, 0.0f, 1.0f);
+    return std::max(timeFactor, distanceFactor * kCollisionWarningDistanceBias);
+}
+
+float exact_collision_warning_intensity(const CollisionWarningCandidate& candidate) {
+    const float impactRadiusSquared = candidate.impactRadius * candidate.impactRadius;
+    const float a = candidate.relativeSpeedSquared;
+    const float b = 2.0f * candidate.approach;
+    const float c = candidate.distanceSquared - impactRadiusSquared;
+    const float discriminant = b * b - 4.0f * a * c;
+    if (discriminant < 0.0f) {
+        return 0.0f;
+    }
+
+    const float timeToImpact = (-b - std::sqrt(discriminant)) / (2.0f * a);
+    if (timeToImpact < 0.0f) {
+        return 0.0f;
+    }
+
+    const bool imminentImpact = timeToImpact <= kCollisionWarningLeadTimeSeconds;
+    if (!imminentImpact && candidate.surfaceDistance > kCollisionWarningRange) {
+        return 0.0f;
+    }
+
+    const float warningProgress = imminentImpact
+        ? (1.0f - std::clamp(timeToImpact / kCollisionWarningLeadTimeSeconds, 0.0f, 1.0f))
+        : ((1.0f - std::clamp(candidate.surfaceDistance / kCollisionWarningRange, 0.0f, 1.0f)) *
+           kCollisionWarningDistanceBias);
+    return std::pow(warningProgress, kCollisionWarningLateSpikeExponent);
+}
+
+template <std::size_t N>
+void insert_collision_warning_candidate(
+    std::array<CollisionWarningCandidate, N>& candidates,
+    std::size_t& candidateCount,
+    const CollisionWarningCandidate& candidate
+) {
+    std::size_t insertIndex = 0;
+    while (insertIndex < candidateCount &&
+           candidates[insertIndex].approximateIntensity >= candidate.approximateIntensity) {
+        ++insertIndex;
+    }
+
+    if (insertIndex >= N) {
+        return;
+    }
+
+    if (candidateCount < N) {
+        ++candidateCount;
+    }
+
+    for (std::size_t index = candidateCount - 1; index > insertIndex; --index) {
+        candidates[index] = candidates[index - 1];
+    }
+    candidates[insertIndex] = candidate;
 }
 
 }
@@ -720,7 +805,7 @@ void GameState::reset() {
     invulnerabilityTimer_ = 0.0f;
     gameOverTimer_ = 0.0f;
     waveAdvancePending_ = false;
-    extraLifeAwarded_ = false;
+    nextExtraLifeScore_ = GameState::kExtraLifeScoreStep;
     extraLifeRevealPending_ = false;
     extraLifeRevealTimer_ = 0.0f;
     asteroidsDestroyedThisRun_ = 0;
@@ -786,11 +871,11 @@ void GameState::award_score(std::uint32_t points) {
         trigger_score_milestone(newMilestoneBucket * kScoreMilestoneStep);
     }
 
-    if (!extraLifeAwarded_ && previousScore < kExtraLifeThreshold && score_ >= kExtraLifeThreshold) {
+    while (score_ >= nextExtraLifeScore_) {
         lives_++;
-        extraLifeAwarded_ = true;
         extraLifeRevealPending_ = true;
         extraLifeRevealTimer_ = kExtraLifeRevealDelaySeconds;
+        nextExtraLifeScore_ += GameState::kExtraLifeScoreStep;
     }
 }
 
@@ -1735,15 +1820,18 @@ void GameState::update_ship_collision_state() {
 }
 
 void GameState::update_collision_warning_state() {
+    collisionWarningExactChecksLastFrame_ = 0;
     float strongestWarningIntensity = 0.0f;
+    std::array<CollisionWarningCandidate, kCollisionWarningMaxExactChecksPerFrame> candidates{};
+    std::size_t candidateCount = 0;
 
     for (const AsteroidState& asteroid : asteroids_) {
         const Vec2 relativePosition = wrapped_relative_position(shipState_.position, asteroid.position);
         const float impactRadius = asteroid.outerRadius + kShipThreatRadius;
-        const float currentDistance = length(relativePosition);
-        const float surfaceDistance = std::max(0.0f, currentDistance - impactRadius);
+        const float impactRadiusSquared = impactRadius * impactRadius;
+        const float distanceSquared = length_squared(relativePosition);
 
-        if (currentDistance <= impactRadius) {
+        if (distanceSquared <= impactRadiusSquared) {
             strongestWarningIntensity = 1.0f;
             break;
         }
@@ -1759,33 +1847,33 @@ void GameState::update_collision_warning_state() {
             continue;
         }
 
-        const float a = relativeSpeedSquared;
-        const float b = 2.0f * approach;
-        const float c = length_squared(relativePosition) - impactRadius * impactRadius;
-        const float discriminant = b * b - 4.0f * a * c;
-        if (discriminant < 0.0f) {
+        const float distance = std::sqrt(distanceSquared);
+        const float surfaceDistance = std::max(0.0f, distance - impactRadius);
+        const float approximateIntensity =
+            approximate_collision_warning_intensity(distance, surfaceDistance, approach);
+        if (approximateIntensity <= 0.0f) {
             continue;
         }
 
-        const float timeToImpact = (-b - std::sqrt(discriminant)) / (2.0f * a);
-        if (timeToImpact < 0.0f) {
-            continue;
-        }
-
-        const bool imminentImpact = timeToImpact <= kCollisionWarningLeadTimeSeconds;
-        if (!imminentImpact && surfaceDistance > kCollisionWarningRange) {
-            continue;
-        }
-
-        const float warningProgress = [&]() {
-            if (imminentImpact) {
-                return 1.0f - std::clamp(timeToImpact / kCollisionWarningLeadTimeSeconds, 0.0f, 1.0f);
+        insert_collision_warning_candidate(
+            candidates,
+            candidateCount,
+            CollisionWarningCandidate{
+                .relativePosition = relativePosition,
+                .relativeVelocity = relativeVelocity,
+                .impactRadius = impactRadius,
+                .distanceSquared = distanceSquared,
+                .relativeSpeedSquared = relativeSpeedSquared,
+                .approach = approach,
+                .surfaceDistance = surfaceDistance,
+                .approximateIntensity = approximateIntensity,
             }
+        );
+    }
 
-            const float distanceFactor = 1.0f - std::clamp(surfaceDistance / kCollisionWarningRange, 0.0f, 1.0f);
-            return distanceFactor * kCollisionWarningDistanceBias;
-        }();
-        const float warningIntensity = std::pow(warningProgress, kCollisionWarningLateSpikeExponent);
+    for (std::size_t candidateIndex = 0; candidateIndex < candidateCount; ++candidateIndex) {
+        ++collisionWarningExactChecksLastFrame_;
+        const float warningIntensity = exact_collision_warning_intensity(candidates[candidateIndex]);
         strongestWarningIntensity = std::max(strongestWarningIntensity, warningIntensity);
     }
 

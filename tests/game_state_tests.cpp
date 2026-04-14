@@ -164,8 +164,16 @@ struct GameStateTestAccess {
         return gameState.waveAdvancePending_;
     }
 
-    static bool& extra_life_awarded(GameState& gameState) {
-        return gameState.extraLifeAwarded_;
+    static std::uint32_t collision_warning_exact_checks_last_frame(const GameState& gameState) {
+        return gameState.collisionWarningExactChecksLastFrame_;
+    }
+
+    static std::size_t collision_warning_max_exact_checks_per_frame() {
+        return GameState::kCollisionWarningMaxExactChecksPerFrame;
+    }
+
+    static std::uint32_t& next_extra_life_score(GameState& gameState) {
+        return gameState.nextExtraLifeScore_;
     }
 
     static bool& extra_life_reveal_pending(GameState& gameState) {
@@ -280,7 +288,7 @@ void reset_world(GameState& gameState) {
     GameStateTestAccess::invulnerability_timer(gameState) = 0.0f;
     GameStateTestAccess::game_over_timer(gameState) = 0.0f;
     GameStateTestAccess::wave_advance_pending(gameState) = false;
-    GameStateTestAccess::extra_life_awarded(gameState) = false;
+    GameStateTestAccess::next_extra_life_score(gameState) = GameState::kExtraLifeScoreStep;
     GameStateTestAccess::extra_life_reveal_pending(gameState) = false;
     GameStateTestAccess::extra_life_reveal_timer(gameState) = 0.0f;
     GameStateTestAccess::rebuild_render_data(gameState);
@@ -761,6 +769,53 @@ void test_collision_warning_is_suppressed_while_invulnerable() {
 
     const AudioFrameState audioFrame = gameState.consume_audio_frame();
     expect(!collision_warning_active(audioFrame), "invulnerable ship should not emit collision warning");
+}
+
+void test_collision_warning_caps_exact_checks_in_crowded_scene() {
+    GameState gameState;
+    reset_world(gameState);
+
+    for (int index = 0; index < 24; ++index) {
+        const float x = 42.0f + static_cast<float>(index % 6) * 6.0f;
+        const float y = (-20.0f) + static_cast<float>(index / 6) * 12.0f;
+        AsteroidState asteroid = make_test_asteroid(AsteroidSizeClass::Large, {x, y}, 6.0f);
+        asteroid.velocity = {-12.0f, y > 0.0f ? -1.5f : 1.5f};
+        GameStateTestAccess::asteroids(gameState).push_back(asteroid);
+    }
+
+    gameState.update(0.016f, InputState{});
+
+    expect(
+        GameStateTestAccess::collision_warning_exact_checks_last_frame(gameState) <=
+            GameStateTestAccess::collision_warning_max_exact_checks_per_frame(),
+        "crowded collision-warning scenes should cap exact intercept solves"
+    );
+}
+
+void test_collision_warning_crowded_scene_keeps_imminent_threat() {
+    GameState gameState;
+    reset_world(gameState);
+
+    for (int index = 0; index < 16; ++index) {
+        const float x = 54.0f + static_cast<float>(index % 4) * 5.0f;
+        const float y = (-18.0f) + static_cast<float>(index / 4) * 12.0f;
+        AsteroidState asteroid = make_test_asteroid(AsteroidSizeClass::Large, {x, y}, 6.0f);
+        asteroid.velocity = {-6.0f, y > 0.0f ? -0.6f : 0.6f};
+        GameStateTestAccess::asteroids(gameState).push_back(asteroid);
+    }
+
+    AsteroidState imminentThreat = make_test_asteroid(AsteroidSizeClass::Large, {18.0f, 0.0f}, 6.0f);
+    imminentThreat.velocity = {-12.0f, 0.0f};
+    GameStateTestAccess::asteroids(gameState).push_back(imminentThreat);
+
+    gameState.update(0.016f, InputState{});
+
+    const AudioFrameState audioFrame = gameState.consume_audio_frame();
+    expect(collision_warning_active(audioFrame), "crowded scenes should still warn on the strongest imminent threat");
+    expect(
+        audioFrame.collisionWarningIntensity > 0.4f,
+        "crowded-scene shortlist should keep the strong imminent warning intensity"
+    );
 }
 
 void test_firing_caps_active_lasers() {
@@ -1506,6 +1561,20 @@ void test_extra_life_at_10000() {
     expect(GameStateTestAccess::lives(gameState) == 3, "crossing 10000 threshold should award extra life");
 }
 
+void test_extra_life_repeats_every_10000_points() {
+    GameState gameState;
+    reset_world(gameState);
+    GameStateTestAccess::score(gameState) = 9950;
+    GameStateTestAccess::lives(gameState) = 2;
+
+    GameStateTestAccess::award_score(gameState, 100);
+    expect(GameStateTestAccess::lives(gameState) == 3, "crossing 10000 should award the first extra life");
+
+    GameStateTestAccess::award_score(gameState, 9950);
+    expect(GameStateTestAccess::score(gameState) == 20000, "score should reach 20000 after the second award");
+    expect(GameStateTestAccess::lives(gameState) == 4, "crossing 20000 should award another extra life");
+}
+
 void test_game_over_on_zero_lives() {
     GameState gameState;
     reset_world(gameState);
@@ -1618,6 +1687,8 @@ int main() {
         {"collision_warning_prioritizes_time_to_impact_over_raw_distance", test_collision_warning_prioritizes_time_to_impact_over_raw_distance},
         {"collision_warning_intensity_rises_as_impact_nears", test_collision_warning_intensity_rises_as_impact_nears},
         {"collision_warning_is_suppressed_while_invulnerable", test_collision_warning_is_suppressed_while_invulnerable},
+        {"collision_warning_caps_exact_checks_in_crowded_scene", test_collision_warning_caps_exact_checks_in_crowded_scene},
+        {"collision_warning_crowded_scene_keeps_imminent_threat", test_collision_warning_crowded_scene_keeps_imminent_threat},
         {"firing_caps_active_lasers", test_firing_caps_active_lasers},
         {"firing_resumes_after_active_shots_clear", test_firing_resumes_after_active_shots_clear},
         {"laser_wrap_waits_until_full_geometry_is_offscreen", test_laser_wrap_waits_until_full_geometry_is_offscreen},
@@ -1656,6 +1727,7 @@ int main() {
         {"new_wave_starts_after_delay_with_announcement_timer", test_new_wave_starts_after_delay_with_announcement_timer},
         {"wave_overlay_uses_next_wave_number_during_prespawn_delay", test_wave_overlay_uses_next_wave_number_during_prespawn_delay},
         {"extra_life_at_10000", test_extra_life_at_10000},
+        {"extra_life_repeats_every_10000_points", test_extra_life_repeats_every_10000_points},
         {"game_over_on_zero_lives", test_game_over_on_zero_lives},
         {"restart_from_game_over", test_restart_from_game_over},
         {"restart_from_game_over_waits_for_prompt_delay", test_restart_from_game_over_waits_for_prompt_delay},

@@ -570,8 +570,8 @@ void ProceduralAudioMixer::spawn_voice_for_event(const AudioEvent& event) {
         break;
     case AudioEventType::ScoreComboTick:
         voice.kind = SynthVoiceKind::ScoreComboTick;
-        voice.durationSeconds = 0.07f + 0.01f * std::min(voice.scalar - 1.0f, 2.5f);
-        voice.gain *= 0.24f + 0.03f * std::min(voice.scalar - 1.0f, 2.5f);
+        voice.durationSeconds = 0.095f + 0.02f * std::min(voice.scalar - 1.0f, 2.5f);
+        voice.gain *= 0.34f + 0.055f * std::min(voice.scalar - 1.0f, 2.5f);
         voice.pan = (next_uniform_sample() * 2.0f - 1.0f) * 0.08f;
         break;
     case AudioEventType::None:
@@ -950,26 +950,36 @@ float ProceduralAudioMixer::render_voice_sample(SynthVoice& voice) {
 
     case SynthVoiceKind::ScoreComboTick: {
         const float comboDepth = std::min(voice.scalar - 1.0f, 2.5f);
-        const float attack = attack_envelope(voice.ageSeconds, 0.0015f);
+        const float attack = attack_envelope(voice.ageSeconds, 0.0012f);
+        const float transientEnv = attack * decay_envelope(normalizedAge, 15.0f);
         const float env =
             attack *
-            decay_envelope(normalizedAge, 8.2f) *
-            (0.95f + 0.08f * comboDepth);
+            decay_envelope(normalizedAge, 6.6f) *
+            (1.0f + 0.12f * comboDepth);
         const float baseFrequency =
-            std::lerp(860.0f, 980.0f, voice.variationA) +
-            comboDepth * 62.0f;
+            std::lerp(980.0f, 1140.0f, voice.variationA) +
+            comboDepth * 88.0f;
         const float glide =
-            std::lerp(1.08f + comboDepth * 0.025f, 1.42f + comboDepth * 0.04f, normalizedAge);
+            std::lerp(1.1f + comboDepth * 0.03f, 1.56f + comboDepth * 0.055f, normalizedAge);
         const float phaseA = advance_phase(voice.phaseA, baseFrequency * glide);
         const float phaseB = advance_phase(voice.phaseB, baseFrequency * 1.52f * glide);
+        const float phaseC = advance_phase(voice.filterStateA, baseFrequency * 2.35f * glide);
         const float sparkle =
-            std::sin(phaseA * 2.0f + 0.18f) * 0.12f +
-            std::sin(phaseB * 2.0f + 0.34f) * 0.06f;
-        sample = voice.gain * env * (
-            squareish_wave(phaseA) * 0.58f +
-            std::sin(phaseA) * 0.12f +
-            std::sin(phaseB) * (0.2f + 0.03f * comboDepth) +
-            sparkle
+            std::sin(phaseA * 2.0f + 0.18f) * 0.14f +
+            std::sin(phaseB * 2.0f + 0.34f) * 0.09f +
+            std::sin(phaseC + 0.12f) * 0.08f;
+        const float transient =
+            squareish_wave(phaseB) * (0.34f + 0.05f * comboDepth) +
+            std::sin(phaseC) * 0.14f +
+            sparkle * 1.25f;
+        const float body =
+            squareish_wave(phaseA) * 0.62f +
+            std::sin(phaseA) * 0.16f +
+            std::sin(phaseB) * (0.24f + 0.05f * comboDepth) +
+            sparkle;
+        sample = voice.gain * std::tanh(
+            transientEnv * transient +
+            env * body
         );
         break;
     }

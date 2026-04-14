@@ -415,6 +415,7 @@ public:
     static constexpr float kWaveAdvanceDelaySeconds = 1.0f;
     static constexpr float kWaveAnnouncementSeconds = 1.5f;
     static constexpr float kGameOverRestartDelaySeconds = 2.0f;
+    static constexpr std::uint32_t kExtraLifeScoreStep = 10000;
 
     GameState();
 
@@ -432,6 +433,7 @@ public:
 
 private:
     friend struct GameStateTestAccess;
+    static constexpr std::size_t kCollisionWarningMaxExactChecksPerFrame = 8;
 
     struct AsteroidBounds {
         float minX = 0.0f;
@@ -531,8 +533,9 @@ private:
     float phaseTimer_ = 0.0f;
     float invulnerabilityTimer_ = 0.0f;
     float gameOverTimer_ = 0.0f;
+    std::uint32_t collisionWarningExactChecksLastFrame_ = 0;
     bool waveAdvancePending_ = false;
-    bool extraLifeAwarded_ = false;
+    std::uint32_t nextExtraLifeScore_ = kExtraLifeScoreStep;
     bool extraLifeRevealPending_ = false;
     float extraLifeRevealTimer_ = 0.0f;
     std::uint32_t asteroidsDestroyedThisRun_ = 0;

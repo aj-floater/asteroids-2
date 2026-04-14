@@ -29,6 +29,7 @@ private:
     static void framebuffer_resize_callback(GLFWwindow* window, int width, int height);
     static void window_focus_callback(GLFWwindow* window, int focused);
     static void cursor_position_callback(GLFWwindow* window, double xpos, double ypos);
+    static void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 
     void initialize();
     void main_loop();
@@ -64,6 +65,7 @@ private:
     bool previousGameOverClickHeld_ = false;
     double previousMenuCursorX_ = 0.0;
     double previousMenuCursorY_ = 0.0;
+    double pendingMenuScrollY_ = 0.0;
     bool hasPreviousMenuCursorPosition_ = false;
     bool previousMenuClickHeld_ = false;
     bool suppressThrustMouseUntilRelease_ = false;

@@ -1712,27 +1712,33 @@ void VulkanRenderer::create_starfield() {
             -backgroundHalfExtents.x + next_random(rng) * backgroundHalfExtents.x * 2.0f;
         const float y =
             -backgroundHalfExtents.y + next_random(rng) * backgroundHalfExtents.y * 2.0f;
-        const float warmCoolMix = next_random(rng);
         const float size = 0.12f + next_random(rng) * 0.42f;
         const float baseBrightness = 0.35f + next_random(rng) * 0.5f;
         const float twinkleAmplitude = 0.04f + next_random(rng) * 0.14f;
         const float twinkleSpeed = 0.5f + next_random(rng) * 1.7f;
         const float twinklePhase = next_random(rng) * 2.0f * std::numbers::pi_v<float>;
+        const float spectralRoll = next_random(rng);
+        const float tintRoll = next_random(rng);
 
-        const ColorRgb cool = {0.86f, 0.9f, 1.0f};
         const ColorRgb neutral = {1.0f, 1.0f, 1.0f};
-        const ColorRgb warm = {1.0f, 0.97f, 0.9f};
-        const ColorRgb tintA = {
-            neutral.r + (cool.r - neutral.r) * std::max(0.0f, (warmCoolMix - 0.5f) * 2.0f),
-            neutral.g + (cool.g - neutral.g) * std::max(0.0f, (warmCoolMix - 0.5f) * 2.0f),
-            neutral.b + (cool.b - neutral.b) * std::max(0.0f, (warmCoolMix - 0.5f) * 2.0f),
+        const ColorRgb cool = {0.78f, 0.86f, 1.0f};
+        const ColorRgb warm = {1.0f, 0.9f, 0.8f};
+
+        ColorRgb targetColor = neutral;
+        if (spectralRoll < 0.16f) {
+            targetColor = warm;
+        } else if (spectralRoll > 0.84f) {
+            targetColor = cool;
+        }
+
+        const float tintStrength =
+            (0.12f + tintRoll * 0.24f) *
+            std::clamp(0.45f + baseBrightness * 0.5f, 0.0f, 1.0f);
+        const ColorRgb color = {
+            neutral.r + (targetColor.r - neutral.r) * tintStrength,
+            neutral.g + (targetColor.g - neutral.g) * tintStrength,
+            neutral.b + (targetColor.b - neutral.b) * tintStrength,
         };
-        const ColorRgb tintB = {
-            neutral.r + (warm.r - neutral.r) * std::max(0.0f, (0.5f - warmCoolMix) * 2.0f),
-            neutral.g + (warm.g - neutral.g) * std::max(0.0f, (0.5f - warmCoolMix) * 2.0f),
-            neutral.b + (warm.b - neutral.b) * std::max(0.0f, (0.5f - warmCoolMix) * 2.0f),
-        };
-        const ColorRgb color = warmCoolMix >= 0.5f ? tintA : tintB;
 
         upload.push_back({
             .position = {x, y},

@@ -18,6 +18,8 @@ namespace {
 
 constexpr int kInitialWindowWidth = 1280;
 constexpr int kInitialWindowHeight = 960;
+constexpr int kMinimumWindowWidth = 800;
+constexpr int kMinimumWindowHeight = 600;
 constexpr float kMaxDeltaTimeSeconds = 1.0f / 40.0f;
 constexpr float kMouseTurnDeadzonePixels = 0.01f;
 
@@ -179,6 +181,12 @@ std::size_t count_selectables(std::span<const MenuLine> lines) {
         if (l.type == MenuLineType::Selectable) ++n;
     }
     return n;
+}
+
+int consume_scroll_steps(double& pendingScrollY) {
+    const double wholeSteps = std::trunc(pendingScrollY);
+    pendingScrollY -= wholeSteps;
+    return static_cast<int>(wholeSteps);
 }
 
 void sync_menu_pointer_state(
@@ -369,6 +377,15 @@ void App::cursor_position_callback(GLFWwindow* window, double xpos, double) {
     app->previousMouseX_ = xpos;
 }
 
+void App::scroll_callback(GLFWwindow* window, double, double yoffset) {
+    auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
+    if (app == nullptr || app->appMode_ != AppMode::Settings) {
+        return;
+    }
+
+    app->pendingMenuScrollY_ += yoffset;
+}
+
 void App::initialize() {
     if (glfwInit() != GLFW_TRUE) {
         throw std::runtime_error("Failed to initialize GLFW.");
@@ -382,11 +399,19 @@ void App::initialize() {
         glfwTerminate();
         throw std::runtime_error("Failed to create GLFW window.");
     }
+    glfwSetWindowSizeLimits(
+        window_,
+        kMinimumWindowWidth,
+        kMinimumWindowHeight,
+        GLFW_DONT_CARE,
+        GLFW_DONT_CARE
+    );
 
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, framebuffer_resize_callback);
     glfwSetWindowFocusCallback(window_, window_focus_callback);
     glfwSetCursorPosCallback(window_, cursor_position_callback);
+    glfwSetScrollCallback(window_, scroll_callback);
 
     settingsStore_.load();
     fullscreenEnabled_ = false;
@@ -780,6 +805,36 @@ void App::main_loop() {
 
             bool settingsChanged = false;
             bool leaveSettings = escPressed;
+            const int scrollSteps = consume_scroll_steps(pendingMenuScrollY_);
+
+            if (scrollSteps != 0) {
+                double cursorX = 0.0;
+                double cursorY = 0.0;
+                glfwGetCursorPos(window_, &cursorX, &cursorY);
+                const auto hoveredSettingIndex = hovered_selectable_in_overlay(
+                    window_,
+                    settingsLines,
+                    MenuOverlayPlacement::Fixed,
+                    cursorX,
+                    cursorY
+                );
+
+                if (hoveredSettingIndex.has_value()) {
+                    menuSelectedIndex_ = *hoveredSettingIndex;
+                    if (*hoveredSettingIndex == 0) {
+                        const float previousVolume = settingsStore_.settings().sfxVolume;
+                        adjust_sfx_volume(scrollSteps);
+                        settingsChanged =
+                            std::abs(settingsStore_.settings().sfxVolume - previousVolume) > 0.0001f;
+                    } else if (*hoveredSettingIndex == 1) {
+                        const bool enableFullscreen = scrollSteps > 0;
+                        if (enableFullscreen != fullscreenEnabled_) {
+                            set_fullscreen_enabled(enableFullscreen);
+                            settingsChanged = true;
+                        }
+                    }
+                }
+            }
 
             if (menuSelectedIndex_ == 0) {
                 if (leftPressed) {
@@ -1222,6 +1277,7 @@ void App::open_settings(AppMode returnMode, std::size_t returnSelectedIndex) {
     settingsReturnSelectedIndex_ = returnSelectedIndex;
     appMode_ = AppMode::Settings;
     menuSelectedIndex_ = 0;
+    pendingMenuScrollY_ = 0.0;
     sync_menu_pointer_state(
         window_,
         previousMenuCursorX_,
@@ -1234,6 +1290,7 @@ void App::open_settings(AppMode returnMode, std::size_t returnSelectedIndex) {
 void App::close_settings() {
     appMode_ = settingsReturnMode_;
     menuSelectedIndex_ = settingsReturnSelectedIndex_;
+    pendingMenuScrollY_ = 0.0;
     sync_menu_pointer_state(
         window_,
         previousMenuCursorX_,
