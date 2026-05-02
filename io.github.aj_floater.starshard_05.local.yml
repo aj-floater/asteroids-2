@@ -1,0 +1,43 @@
+app-id: io.github.aj_floater.starshard_05
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: starshard-05
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pulseaudio
+
+modules:
+  - name: glfw
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DBUILD_SHARED_LIBS=ON
+      - -DGLFW_BUILD_DOCS=OFF
+      - -DGLFW_BUILD_EXAMPLES=OFF
+      - -DGLFW_BUILD_TESTS=OFF
+    cleanup:
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+      - '*.a'
+    sources:
+      - type: git
+        url: https://github.com/glfw/glfw.git
+        tag: '3.4'
+
+  - name: starshard-05
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DBUILD_TESTING=OFF
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - .flatpak-builder
+          - build
+          - build-starshard
+          - flatpak-build

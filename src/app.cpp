@@ -1,5 +1,7 @@
 #include "app.h"
 
+#include "app_identity.h"
+
 #include "menu_overlay.h"
 #include "viewport_layout.h"
 
@@ -23,9 +25,10 @@ constexpr int kMinimumWindowHeight = 600;
 constexpr float kMaxDeltaTimeSeconds = 1.0f / 40.0f;
 constexpr float kMouseTurnDeadzonePixels = 0.01f;
 
-constexpr const char* kStartMenuTitle = "ASTEROIDS";
+constexpr const char* kStartMenuTitle = AppIdentity::kMenuTitle;
 constexpr const char* kPauseMenuTitle = "PAUSED";
 constexpr const char* kSettingsTitle = "SETTINGS";
+constexpr const char* kControlsTitle = "CONTROLS";
 constexpr float kMenuLetterStrokeWidth = 0.18f;
 constexpr float kMenuTextHeight = 1.8f;
 constexpr float kMenuItemHorizontalPadding = 0.03f;
@@ -53,6 +56,49 @@ struct MenuMouseState {
     bool pointerMoved = false;
 };
 
+ControlLayout step_control_layout(ControlLayout layout, int delta) {
+    constexpr std::array<ControlLayout, 3> kLayouts{{
+        ControlLayout::Keyboard,
+        ControlLayout::Mouse,
+        ControlLayout::Touchpad,
+    }};
+    std::size_t index = 0;
+    for (std::size_t i = 0; i < kLayouts.size(); ++i) {
+        if (kLayouts[i] == layout) {
+            index = i;
+            break;
+        }
+    }
+
+    const int span = static_cast<int>(kLayouts.size());
+    const int offset = ((delta % span) + span) % span;
+    index = (index + static_cast<std::size_t>(offset)) % kLayouts.size();
+    return kLayouts[index];
+}
+
+TouchpadClickPreset step_touchpad_click_preset(TouchpadClickPreset preset, int delta) {
+    if ((std::abs(delta) % 2) == 0) {
+        return preset;
+    }
+    return preset == TouchpadClickPreset::NK
+        ? TouchpadClickPreset::BH
+        : TouchpadClickPreset::NK;
+}
+
+bool layout_uses_left_mouse_click_for_thrust(ControlLayout layout) {
+    return layout == ControlLayout::Mouse;
+}
+
+int glfw_key_from_touchpad_char(char key) {
+    switch (key) {
+    case 'B': return GLFW_KEY_B;
+    case 'H': return GLFW_KEY_H;
+    case 'K': return GLFW_KEY_K;
+    case 'N': return GLFW_KEY_N;
+    default:  return GLFW_KEY_UNKNOWN;
+    }
+}
+
 float menu_letter_width(char ch) {
     switch (ch) {
     case 'B': return 0.8f + kMenuLetterStrokeWidth;
@@ -62,6 +108,9 @@ float menu_letter_width(char ch) {
     case 'W': return 1.2f;
     case '1': return 0.65f;
     case ':': return 0.7f;
+    case '+': return 0.72f;
+    case '-': return 0.72f;
+    case '/': return 0.72f;
     case ' ': return 0.5f;
     default:  return 1.0f;
     }
@@ -181,6 +230,14 @@ std::size_t count_selectables(std::span<const MenuLine> lines) {
         if (l.type == MenuLineType::Selectable) ++n;
     }
     return n;
+}
+
+std::size_t clamp_selected_index(std::size_t index, std::span<const MenuLine> lines) {
+    const std::size_t selectableCount = count_selectables(lines);
+    if (selectableCount == 0) {
+        return 0;
+    }
+    return std::min(index, selectableCount - 1);
 }
 
 int consume_scroll_steps(double& pendingScrollY) {
@@ -358,12 +415,12 @@ void App::window_focus_callback(GLFWwindow* window, int focused) {
     auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
     if (app != nullptr) {
         if (app->appMode_ == AppMode::Playing) {
-            app->set_mouse_capture(focused == GLFW_TRUE);
+            app->set_gameplay_pointer_capture(focused == GLFW_TRUE);
         }
     }
 }
 
-void App::cursor_position_callback(GLFWwindow* window, double xpos, double) {
+void App::cursor_position_callback(GLFWwindow* window, double xpos, double ypos) {
     auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
     if (app == nullptr || !app->mouseCaptured_) {
         return;
@@ -371,15 +428,17 @@ void App::cursor_position_callback(GLFWwindow* window, double xpos, double) {
 
     if (app->hasPreviousMousePosition_) {
         app->pendingMouseDeltaX_ += static_cast<float>(xpos - app->previousMouseX_);
+        app->pendingMouseDeltaY_ += static_cast<float>(ypos - app->previousMouseY_);
     } else {
         app->hasPreviousMousePosition_ = true;
     }
     app->previousMouseX_ = xpos;
+    app->previousMouseY_ = ypos;
 }
 
 void App::scroll_callback(GLFWwindow* window, double, double yoffset) {
     auto* app = static_cast<App*>(glfwGetWindowUserPointer(window));
-    if (app == nullptr || app->appMode_ != AppMode::Settings) {
+    if (app == nullptr || (app->appMode_ != AppMode::Settings && app->appMode_ != AppMode::Controls)) {
         return;
     }
 
@@ -394,7 +453,13 @@ void App::initialize() {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    window_ = glfwCreateWindow(kInitialWindowWidth, kInitialWindowHeight, "Asteroids", nullptr, nullptr);
+    window_ = glfwCreateWindow(
+        kInitialWindowWidth,
+        kInitialWindowHeight,
+        AppIdentity::kDisplayName,
+        nullptr,
+        nullptr
+    );
     if (window_ == nullptr) {
         glfwTerminate();
         throw std::runtime_error("Failed to create GLFW window.");
@@ -509,7 +574,8 @@ void App::main_loop() {
                 switch (menuSelectedIndex_) {
                 case 0: // START
                     if (result.mouseActivatePressed) {
-                        suppressThrustMouseUntilRelease_ = true;
+                        suppressThrustMouseUntilRelease_ =
+                            layout_uses_left_mouse_click_for_thrust(settingsStore_.settings().controlLayout);
                     }
                     if (activeIdx.has_value()) {
                         profileStore_.increment_runs_played(*activeIdx);
@@ -518,7 +584,7 @@ void App::main_loop() {
                     gameState_.reset();
                     previousGamePhase_ = GamePhase::Playing;
                     appMode_ = AppMode::Playing;
-                    set_mouse_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
+                    set_gameplay_pointer_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
                     menuSelectedIndex_ = 0;
                     break;
                 case 1: // PROFILES
@@ -568,7 +634,7 @@ void App::main_loop() {
                     }
                     runCommitted_ = true;
                 }
-                set_mouse_capture(false);
+                set_gameplay_pointer_capture(false);
                 gameOverMenuSelectedIndex_ = 0;
                 previousGameOverClickHeld_ = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
             }
@@ -577,7 +643,7 @@ void App::main_loop() {
             if (escPressed && hud.phase != GamePhase::GameOver) {
                 appMode_ = AppMode::Paused;
                 menuSelectedIndex_ = 0;
-                set_mouse_capture(false);
+                set_gameplay_pointer_capture(false);
                 AudioFrameState pauseMenuAudioFrame{};
                 push_audio_event(pauseMenuAudioFrame, AudioEventType::PauseMenuOpened);
                 audioEngine_.submit_audio_frame(pauseMenuAudioFrame);
@@ -657,10 +723,11 @@ void App::main_loop() {
             renderHud.gameOverMenuSelectedIndex = static_cast<std::uint32_t>(gameOverMenuSelectedIndex_);
             if (hud.phase == GamePhase::GameOver && renderHud.phase != GamePhase::GameOver) {
                 if (restartSelected && gameOverClickPressed) {
-                    suppressThrustMouseUntilRelease_ = true;
+                    suppressThrustMouseUntilRelease_ =
+                        layout_uses_left_mouse_click_for_thrust(settingsStore_.settings().controlLayout);
                 }
                 gameOverMenuSelectedIndex_ = 0;
-                set_mouse_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
+                set_gameplay_pointer_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
             }
             if (mainMenuSelected && renderHud.phase == GamePhase::GameOver) {
                 appMode_ = AppMode::StartMenu;
@@ -711,13 +778,15 @@ void App::main_loop() {
 
             if (resume) {
                 if (result.mouseActivatePressed) {
-                    suppressThrustMouseUntilRelease_ = true;
+                    suppressThrustMouseUntilRelease_ =
+                        layout_uses_left_mouse_click_for_thrust(settingsStore_.settings().controlLayout);
                 }
                 appMode_ = AppMode::Playing;
-                set_mouse_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
+                set_gameplay_pointer_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
             } else if (restart) {
                 if (result.mouseActivatePressed) {
-                    suppressThrustMouseUntilRelease_ = true;
+                    suppressThrustMouseUntilRelease_ =
+                        layout_uses_left_mouse_click_for_thrust(settingsStore_.settings().controlLayout);
                 }
                 // Commit current run before starting a new one.
                 if (!runCommitted_) {
@@ -734,7 +803,7 @@ void App::main_loop() {
                 gameState_.reset();
                 previousGamePhase_ = GamePhase::Playing;
                 appMode_ = AppMode::Playing;
-                set_mouse_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
+                set_gameplay_pointer_capture(glfwGetWindowAttrib(window_, GLFW_FOCUSED) == GLFW_TRUE);
                 menuSelectedIndex_ = 0;
             } else if (goMainMenu) {
                 if (!runCommitted_) {
@@ -787,9 +856,10 @@ void App::main_loop() {
                 fullscreenEnabled_ ? "ON" : "OFF"
             );
 
-            std::array<MenuLine, 3> settingsLines{{
+            std::array<MenuLine, 4> settingsLines{{
                 {MenuLineType::Selectable, volumeLabelBuf, nullptr, false, 0.0f},
                 {MenuLineType::Selectable, fullscreenLabelBuf, nullptr, false, 0.0f},
+                {MenuLineType::Selectable, "CONTROLS", nullptr, false, 0.0f},
                 {MenuLineType::Selectable, "BACK", nullptr, false, MenuLayout::kSelectableStep * 0.5f},
             }};
 
@@ -805,6 +875,7 @@ void App::main_loop() {
 
             bool settingsChanged = false;
             bool leaveSettings = escPressed;
+            bool openControlsMenu = false;
             const int scrollSteps = consume_scroll_steps(pendingMenuScrollY_);
 
             if (scrollSteps != 0) {
@@ -858,6 +929,8 @@ void App::main_loop() {
                     settingsChanged = true;
                 }
             } else if (menuSelectedIndex_ == 2 && result.activatePressed) {
+                openControlsMenu = true;
+            } else if (menuSelectedIndex_ == 3 && result.activatePressed) {
                 leaveSettings = true;
             }
 
@@ -866,6 +939,10 @@ void App::main_loop() {
             }
             audioEngine_.submit_audio_frame(menuAudioFrame);
 
+            if (openControlsMenu) {
+                open_controls();
+                break;
+            }
             if (leaveSettings) {
                 close_settings();
                 break;
@@ -874,6 +951,298 @@ void App::main_loop() {
             MenuOverlayState menuOverlay{};
             menuOverlay.title         = kSettingsTitle;
             menuOverlay.lines         = settingsLines;
+            menuOverlay.selectedIndex = menuSelectedIndex_;
+            menuOverlay.placement     = MenuOverlayPlacement::Fixed;
+
+            if (settingsReturnMode_ == AppMode::Paused) {
+                renderer_.render(
+                    gameState_.ship(), gameState_.particles(),
+                    gameState_.asteroids(), gameState_.hud_state(),
+                    deltaTimeSeconds, RenderMode::Paused, menuOverlay
+                );
+            } else {
+                const auto menuAsteroidData = menuAsteroids_.render_data();
+                ShipState dummyShip{};
+                HudState dummyHud{};
+                renderer_.render(
+                    dummyShip, {}, menuAsteroidData, dummyHud,
+                    deltaTimeSeconds, RenderMode::StartMenu, menuOverlay
+                );
+            }
+            break;
+        }
+
+        // ===================================================================
+        case AppMode::Controls: {
+            if (settingsReturnMode_ == AppMode::StartMenu) {
+                menuAsteroids_.update(deltaTimeSeconds);
+            }
+
+            char layoutLabelBuf[48];
+            char mouseSensitivityLabelBuf[48];
+            char touchpadSensitivityLabelBuf[52];
+            char axisLabelBuf[32];
+            char clickKeysLabelBuf[32];
+            std::array<MenuLine, 5> controlsLinesStorage{};
+            auto build_controls_lines = [&]() -> std::span<const MenuLine> {
+                const ControlLayout controlLayout = settingsStore_.settings().controlLayout;
+                std::snprintf(
+                    layoutLabelBuf,
+                    sizeof(layoutLabelBuf),
+                    "CONTROL LAYOUT: %s",
+                    control_layout_menu_label(controlLayout)
+                );
+                std::snprintf(
+                    mouseSensitivityLabelBuf,
+                    sizeof(mouseSensitivityLabelBuf),
+                    "MOUSE SENSITIVITY: %d PCT",
+                    settingsStore_.settings().mouseSensitivityPercent
+                );
+                std::snprintf(
+                    touchpadSensitivityLabelBuf,
+                    sizeof(touchpadSensitivityLabelBuf),
+                    "TOUCHPAD SENSITIVITY: %d PCT",
+                    settingsStore_.settings().touchpadSensitivityPercent
+                );
+                std::snprintf(
+                    axisLabelBuf,
+                    sizeof(axisLabelBuf),
+                    "TURN AXIS: %+d DEG",
+                    settingsStore_.settings().touchpadTurnAxisDegrees
+                );
+                std::snprintf(
+                    clickKeysLabelBuf,
+                    sizeof(clickKeysLabelBuf),
+                    "CLICK KEYS: %s",
+                    touchpad_click_preset_label(settingsStore_.settings().touchpadClickPreset)
+                );
+
+                std::size_t lineCount = 0;
+                controlsLinesStorage[lineCount++] = {
+                    MenuLineType::Selectable, layoutLabelBuf, nullptr, false, 0.0f
+                };
+                if (controlLayout == ControlLayout::Mouse) {
+                    controlsLinesStorage[lineCount++] = {
+                        MenuLineType::Selectable, mouseSensitivityLabelBuf, nullptr, false, 0.0f
+                    };
+                } else if (controlLayout == ControlLayout::Touchpad) {
+                    controlsLinesStorage[lineCount++] = {
+                        MenuLineType::Selectable, touchpadSensitivityLabelBuf, nullptr, false, 0.0f
+                    };
+                    controlsLinesStorage[lineCount++] = {
+                        MenuLineType::Selectable, axisLabelBuf, nullptr, false, 0.0f
+                    };
+                    controlsLinesStorage[lineCount++] = {
+                        MenuLineType::Selectable, clickKeysLabelBuf, nullptr, false, 0.0f
+                    };
+                }
+                controlsLinesStorage[lineCount++] = {
+                    MenuLineType::Selectable, "BACK", nullptr, false, MenuLayout::kSelectableStep * 0.5f
+                };
+                return {controlsLinesStorage.data(), lineCount};
+            };
+
+            auto cycle_control_layout = [&](int delta) {
+                if (delta == 0) {
+                    return false;
+                }
+                const ControlLayout previous = settingsStore_.settings().controlLayout;
+                const ControlLayout next = step_control_layout(previous, delta);
+                if (next == previous) {
+                    return false;
+                }
+                settingsStore_.set_control_layout(next);
+                if (next != ControlLayout::Mouse) {
+                    suppressThrustMouseUntilRelease_ = false;
+                }
+                return true;
+            };
+
+            auto adjust_mouse_sensitivity = [&](int delta) {
+                if (delta == 0) {
+                    return false;
+                }
+                const int previous = settingsStore_.settings().mouseSensitivityPercent;
+                settingsStore_.set_mouse_sensitivity_percent(
+                    previous + delta * kPointerSensitivityStepPercent
+                );
+                return settingsStore_.settings().mouseSensitivityPercent != previous;
+            };
+
+            auto adjust_touchpad_sensitivity = [&](int delta) {
+                if (delta == 0) {
+                    return false;
+                }
+                const int previous = settingsStore_.settings().touchpadSensitivityPercent;
+                settingsStore_.set_touchpad_sensitivity_percent(
+                    previous + delta * kPointerSensitivityStepPercent
+                );
+                return settingsStore_.settings().touchpadSensitivityPercent != previous;
+            };
+
+            auto adjust_touchpad_axis = [&](int delta) {
+                if (delta == 0 || settingsStore_.settings().controlLayout != ControlLayout::Touchpad) {
+                    return false;
+                }
+                const int previous = settingsStore_.settings().touchpadTurnAxisDegrees;
+                settingsStore_.set_touchpad_turn_axis_degrees(
+                    previous + delta * kTouchpadTurnAxisStepDegrees
+                );
+                return settingsStore_.settings().touchpadTurnAxisDegrees != previous;
+            };
+
+            auto cycle_touchpad_click_preset = [&](int delta) {
+                if (delta == 0 || settingsStore_.settings().controlLayout != ControlLayout::Touchpad) {
+                    return false;
+                }
+                const TouchpadClickPreset previous = settingsStore_.settings().touchpadClickPreset;
+                const TouchpadClickPreset next = step_touchpad_click_preset(previous, delta);
+                if (next == previous) {
+                    return false;
+                }
+                settingsStore_.set_touchpad_click_preset(next);
+                return true;
+            };
+
+            std::span<const MenuLine> controlsLines = build_controls_lines();
+            menuSelectedIndex_ = clamp_selected_index(menuSelectedIndex_, controlsLines);
+
+            AudioFrameState menuAudioFrame{};
+            const OverlayResult result = run_overlay_frame(
+                window_, controlsLines, MenuOverlayPlacement::Fixed, menuSelectedIndex_,
+                upPressed, downPressed, enterPressed,
+                previousMenuCursorX_, previousMenuCursorY_,
+                hasPreviousMenuCursorPosition_, previousMenuClickHeld_,
+                menuAudioFrame
+            );
+            menuSelectedIndex_ = result.newSelectedIndex;
+
+            bool settingsChanged = false;
+            bool leaveControls = escPressed;
+            const int scrollSteps = consume_scroll_steps(pendingMenuScrollY_);
+            const ControlLayout controlLayoutBeforeInput = settingsStore_.settings().controlLayout;
+            const bool mouseSensitivityVisibleBeforeInput = controlLayoutBeforeInput == ControlLayout::Mouse;
+            const bool touchpadVisibleBeforeInput = controlLayoutBeforeInput == ControlLayout::Touchpad;
+            const std::size_t mouseSensitivityIndexBeforeInput = 1u;
+            const std::size_t touchpadSensitivityIndexBeforeInput = 1u;
+            const std::size_t touchpadAxisIndexBeforeInput = 2u;
+            const std::size_t touchpadClickPresetIndexBeforeInput = 3u;
+
+            if (scrollSteps != 0) {
+                double cursorX = 0.0;
+                double cursorY = 0.0;
+                glfwGetCursorPos(window_, &cursorX, &cursorY);
+                const auto hoveredControlIndex = hovered_selectable_in_overlay(
+                    window_,
+                    controlsLines,
+                    MenuOverlayPlacement::Fixed,
+                    cursorX,
+                    cursorY
+                );
+
+                if (hoveredControlIndex.has_value()) {
+                    menuSelectedIndex_ = *hoveredControlIndex;
+                    if (*hoveredControlIndex == 0) {
+                        settingsChanged = cycle_control_layout(scrollSteps) || settingsChanged;
+                    } else if (
+                        mouseSensitivityVisibleBeforeInput &&
+                        *hoveredControlIndex == mouseSensitivityIndexBeforeInput
+                    ) {
+                        settingsChanged = adjust_mouse_sensitivity(scrollSteps) || settingsChanged;
+                    } else if (
+                        touchpadVisibleBeforeInput &&
+                        *hoveredControlIndex == touchpadSensitivityIndexBeforeInput
+                    ) {
+                        settingsChanged = adjust_touchpad_sensitivity(scrollSteps) || settingsChanged;
+                    } else if (
+                        touchpadVisibleBeforeInput &&
+                        *hoveredControlIndex == touchpadAxisIndexBeforeInput
+                    ) {
+                        settingsChanged = adjust_touchpad_axis(scrollSteps) || settingsChanged;
+                    } else if (
+                        touchpadVisibleBeforeInput &&
+                        *hoveredControlIndex == touchpadClickPresetIndexBeforeInput
+                    ) {
+                        settingsChanged = cycle_touchpad_click_preset(scrollSteps) || settingsChanged;
+                    }
+                }
+            }
+
+            const ControlLayout controlLayoutForSelection = settingsStore_.settings().controlLayout;
+            const bool mouseSensitivityVisibleForSelection = controlLayoutForSelection == ControlLayout::Mouse;
+            const bool touchpadVisibleForSelection = controlLayoutForSelection == ControlLayout::Touchpad;
+            const std::size_t mouseSensitivityIndex = 1u;
+            const std::size_t touchpadSensitivityIndex = 1u;
+            const std::size_t touchpadAxisIndex = 2u;
+            const std::size_t touchpadClickPresetIndex = 3u;
+            const std::size_t backIndex = touchpadVisibleForSelection ? 4u : 1u + (mouseSensitivityVisibleForSelection ? 1u : 0u);
+            if (menuSelectedIndex_ == 0) {
+                if (leftPressed) {
+                    settingsChanged = cycle_control_layout(-1) || settingsChanged;
+                }
+                if (rightPressed || result.activatePressed) {
+                    settingsChanged = cycle_control_layout(1) || settingsChanged;
+                }
+            } else if (
+                mouseSensitivityVisibleForSelection &&
+                menuSelectedIndex_ == mouseSensitivityIndex
+            ) {
+                if (leftPressed) {
+                    settingsChanged = adjust_mouse_sensitivity(-1) || settingsChanged;
+                }
+                if (rightPressed || result.activatePressed) {
+                    settingsChanged = adjust_mouse_sensitivity(1) || settingsChanged;
+                }
+            } else if (
+                touchpadVisibleForSelection &&
+                menuSelectedIndex_ == touchpadSensitivityIndex
+            ) {
+                if (leftPressed) {
+                    settingsChanged = adjust_touchpad_sensitivity(-1) || settingsChanged;
+                }
+                if (rightPressed || result.activatePressed) {
+                    settingsChanged = adjust_touchpad_sensitivity(1) || settingsChanged;
+                }
+            } else if (
+                touchpadVisibleForSelection &&
+                menuSelectedIndex_ == touchpadAxisIndex
+            ) {
+                if (leftPressed) {
+                    settingsChanged = adjust_touchpad_axis(-1) || settingsChanged;
+                }
+                if (rightPressed || result.activatePressed) {
+                    settingsChanged = adjust_touchpad_axis(1) || settingsChanged;
+                }
+            } else if (
+                touchpadVisibleForSelection &&
+                menuSelectedIndex_ == touchpadClickPresetIndex
+            ) {
+                if (leftPressed) {
+                    settingsChanged = cycle_touchpad_click_preset(-1) || settingsChanged;
+                }
+                if (rightPressed || result.activatePressed) {
+                    settingsChanged = cycle_touchpad_click_preset(1) || settingsChanged;
+                }
+            } else if (menuSelectedIndex_ == backIndex && result.activatePressed) {
+                leaveControls = true;
+            }
+
+            controlsLines = build_controls_lines();
+            menuSelectedIndex_ = clamp_selected_index(menuSelectedIndex_, controlsLines);
+
+            if (settingsChanged && !result.activatePressed) {
+                push_audio_event(menuAudioFrame, AudioEventType::MenuSelect);
+            }
+            audioEngine_.submit_audio_frame(menuAudioFrame);
+
+            if (leaveControls) {
+                close_controls();
+                break;
+            }
+
+            MenuOverlayState menuOverlay{};
+            menuOverlay.title         = kControlsTitle;
+            menuOverlay.lines         = controlsLines;
             menuOverlay.selectedIndex = menuSelectedIndex_;
             menuOverlay.placement     = MenuOverlayPlacement::Fixed;
 
@@ -1287,9 +1656,35 @@ void App::open_settings(AppMode returnMode, std::size_t returnSelectedIndex) {
     );
 }
 
+void App::open_controls() {
+    appMode_ = AppMode::Controls;
+    menuSelectedIndex_ = 0;
+    pendingMenuScrollY_ = 0.0;
+    sync_menu_pointer_state(
+        window_,
+        previousMenuCursorX_,
+        previousMenuCursorY_,
+        hasPreviousMenuCursorPosition_,
+        previousMenuClickHeld_
+    );
+}
+
 void App::close_settings() {
     appMode_ = settingsReturnMode_;
     menuSelectedIndex_ = settingsReturnSelectedIndex_;
+    pendingMenuScrollY_ = 0.0;
+    sync_menu_pointer_state(
+        window_,
+        previousMenuCursorX_,
+        previousMenuCursorY_,
+        hasPreviousMenuCursorPosition_,
+        previousMenuClickHeld_
+    );
+}
+
+void App::close_controls() {
+    appMode_ = AppMode::Settings;
+    menuSelectedIndex_ = 2;
     pendingMenuScrollY_ = 0.0;
     sync_menu_pointer_state(
         window_,
@@ -1323,26 +1718,56 @@ void App::shutdown() {
 
 InputState App::poll_input() {
     InputState inputState;
-    inputState.rotateLeft = glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS;
-    inputState.rotateRight = glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS;
+    const AppSettings& settings = settingsStore_.settings();
+    const ControlLayout controlLayout = settings.controlLayout;
+    bool fireHeld = false;
 
-    if (mouseCaptured_ && std::abs(pendingMouseDeltaX_) >= kMouseTurnDeadzonePixels) {
-        inputState.mouseTurnDelta = pendingMouseDeltaX_;
-    }
-    pendingMouseDeltaX_ = 0.0f;
+    if (controlLayout == ControlLayout::Keyboard) {
+        inputState.rotateLeft = glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS;
+        inputState.rotateRight = glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS;
+        inputState.thrustForward = glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS;
+        fireHeld = glfwGetKey(window_, GLFW_KEY_SPACE) == GLFW_PRESS;
+        suppressThrustMouseUntilRelease_ = false;
+    } else if (controlLayout == ControlLayout::Mouse) {
+        if (mouseCaptured_ && std::abs(pendingMouseDeltaX_) >= kMouseTurnDeadzonePixels) {
+            inputState.mouseTurnDelta =
+                pendingMouseDeltaX_ * pointer_sensitivity_multiplier(settings.mouseSensitivityPercent);
+        }
 
-    const bool leftMouseHeld = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-    if (suppressThrustMouseUntilRelease_ && !leftMouseHeld) {
+        const bool leftMouseHeld = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        if (suppressThrustMouseUntilRelease_ && !leftMouseHeld) {
+            suppressThrustMouseUntilRelease_ = false;
+        }
+        inputState.thrustForward = !suppressThrustMouseUntilRelease_ && leftMouseHeld;
+        fireHeld = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    } else {
+        if (mouseCaptured_) {
+            const float projectedTurnDelta = project_touchpad_turn_delta(
+                pendingMouseDeltaX_,
+                pendingMouseDeltaY_,
+                settings.touchpadTurnAxisDegrees
+            );
+            if (std::abs(projectedTurnDelta) >= kMouseTurnDeadzonePixels) {
+                inputState.mouseTurnDelta =
+                    projectedTurnDelta * pointer_sensitivity_multiplier(settings.touchpadSensitivityPercent);
+            }
+        }
+
+        const auto [leftKeyChar, rightKeyChar] = touchpad_click_preset_keys(settings.touchpadClickPreset);
+        const int leftKey = glfw_key_from_touchpad_char(leftKeyChar);
+        const int rightKey = glfw_key_from_touchpad_char(rightKeyChar);
+        const bool touchpadLeftKeyHeld =
+            leftKey != GLFW_KEY_UNKNOWN && glfwGetKey(window_, leftKey) == GLFW_PRESS;
+        const bool touchpadRightKeyHeld =
+            rightKey != GLFW_KEY_UNKNOWN && glfwGetKey(window_, rightKey) == GLFW_PRESS;
+        inputState.thrustForward = touchpadLeftKeyHeld;
+        fireHeld = touchpadRightKeyHeld;
         suppressThrustMouseUntilRelease_ = false;
     }
 
-    inputState.thrustForward =
-        (!suppressThrustMouseUntilRelease_ && leftMouseHeld) ||
-        glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS;
+    pendingMouseDeltaX_ = 0.0f;
+    pendingMouseDeltaY_ = 0.0f;
 
-    const bool fireHeld =
-        glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS ||
-        glfwGetKey(window_, GLFW_KEY_SPACE) == GLFW_PRESS;
     inputState.firePressed = fireHeld && !previousFireHeld_;
     previousFireHeld_ = fireHeld;
 
@@ -1353,22 +1778,30 @@ InputState App::poll_input() {
     return inputState;
 }
 
-void App::set_mouse_capture(bool capture) {
-    mouseCaptured_ = capture;
-    glfwSetInputMode(window_, GLFW_CURSOR, capture ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+void App::set_gameplay_pointer_capture(bool capture) {
+    const ControlLayout controlLayout = settingsStore_.settings().controlLayout;
+    const bool shouldCapture = capture && controlLayout != ControlLayout::Keyboard;
+    const bool enableRawMouseMotion = shouldCapture && controlLayout == ControlLayout::Mouse;
+
+    mouseCaptured_ = shouldCapture;
+    glfwSetInputMode(window_, GLFW_CURSOR, shouldCapture ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
     if (glfwRawMouseMotionSupported() == GLFW_TRUE) {
-        glfwSetInputMode(window_, GLFW_RAW_MOUSE_MOTION, capture ? GLFW_TRUE : GLFW_FALSE);
+        glfwSetInputMode(
+            window_,
+            GLFW_RAW_MOUSE_MOTION,
+            enableRawMouseMotion ? GLFW_TRUE : GLFW_FALSE
+        );
     }
-    if (capture) {
-        glfwGetCursorPos(window_, &previousMouseX_, nullptr);
+
+    if (shouldCapture) {
+        glfwGetCursorPos(window_, &previousMouseX_, &previousMouseY_);
         hasPreviousMousePosition_ = true;
-        pendingMouseDeltaX_ = 0.0f;
-        previousFireHeld_ = false;
-        previousRestartHeld_ = false;
     } else {
         hasPreviousMousePosition_ = false;
-        pendingMouseDeltaX_ = 0.0f;
-        previousFireHeld_ = false;
-        previousRestartHeld_ = false;
     }
+
+    pendingMouseDeltaX_ = 0.0f;
+    pendingMouseDeltaY_ = 0.0f;
+    previousFireHeld_ = false;
+    previousRestartHeld_ = false;
 }

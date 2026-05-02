@@ -1,5 +1,7 @@
 #include "profile_store.h"
 
+#include "app_identity.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
@@ -10,18 +12,6 @@
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-static std::string xdg_save_dir() {
-    const char* xdgData = std::getenv("XDG_DATA_HOME");
-    if (xdgData && xdgData[0] != '\0') {
-        return std::string(xdgData) + "/asteroids";
-    }
-    const char* home = std::getenv("HOME");
-    if (home && home[0] != '\0') {
-        return std::string(home) + "/.local/share/asteroids";
-    }
-    return "."; // fallback: working directory
-}
 
 static bool parse_uint32(std::string_view sv, std::uint32_t& out) {
     auto result = std::from_chars(sv.data(), sv.data() + sv.size(), out);
@@ -59,7 +49,7 @@ std::string ProfileSlot::default_name(std::size_t index) {
 // ---------------------------------------------------------------------------
 
 std::string ProfileStore::save_path() const {
-    return xdg_save_dir() + "/profiles.txt";
+    return AppIdentity::xdg_data_directory() + "/profiles.txt";
 }
 
 void ProfileStore::load() {
@@ -137,7 +127,7 @@ void ProfileStore::load() {
 }
 
 void ProfileStore::save() const {
-    std::string dir = xdg_save_dir();
+    std::string dir = AppIdentity::xdg_data_directory();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     // If directory creation fails, we try to write anyway (working-dir fallback).

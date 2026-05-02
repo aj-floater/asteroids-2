@@ -19,6 +19,7 @@ enum class AppMode : std::uint32_t {
     ConfirmReset   = 6,
     ConfirmDelete  = 7,
     Settings       = 8,
+    Controls       = 9,
 };
 
 class App {
@@ -35,12 +36,14 @@ private:
     void main_loop();
     void shutdown();
     InputState poll_input();
-    void set_mouse_capture(bool capture);
+    void set_gameplay_pointer_capture(bool capture);
     void apply_sfx_volume(float volume);
     void adjust_sfx_volume(int stepDelta);
     void set_fullscreen_enabled(bool enabled, bool persistSetting = true);
     void open_settings(AppMode returnMode, std::size_t returnSelectedIndex);
     void close_settings();
+    void open_controls();
+    void close_controls();
 
     GLFWwindow* window_ = nullptr;
     AudioEngine audioEngine_;
@@ -52,7 +55,9 @@ private:
     AppMode appMode_ = AppMode::StartMenu;
     bool mouseCaptured_ = false;
     double previousMouseX_ = 0.0;
+    double previousMouseY_ = 0.0;
     float pendingMouseDeltaX_ = 0.0f;
+    float pendingMouseDeltaY_ = 0.0f;
     bool hasPreviousMousePosition_ = false;
     bool previousFireHeld_ = false;
     bool previousRestartHeld_ = false;

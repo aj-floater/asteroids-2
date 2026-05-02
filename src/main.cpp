@@ -1,5 +1,7 @@
 #include "app.h"
 
+#include "app_identity.h"
+
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -10,7 +12,7 @@ int main() {
         app.run();
         return EXIT_SUCCESS;
     } catch (const std::exception& exception) {
-        std::cerr << "Asteroids failed: " << exception.what() << '\n';
+        std::cerr << AppIdentity::kDisplayName << " failed: " << exception.what() << '\n';
         return EXIT_FAILURE;
     }
 }

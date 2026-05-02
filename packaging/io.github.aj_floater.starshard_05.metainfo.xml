@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.aj_floater.starshard_05</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Starshard 05</name>
+  <summary>Retro arcade space shooter with inertia and wraparound combat</summary>
+  <developer id="io.github.aj_floater">
+    <name>aj-floater</name>
+  </developer>
+  <launchable type="desktop-id">io.github.aj_floater.starshard_05.desktop</launchable>
+  <provides>
+    <binary>starshard-05</binary>
+  </provides>
+  <description>
+    <p>Starshard 05 is a fast retro arcade shooter built around inertia, precise turning, and screen-wrap survival.</p>
+    <p>Pilot a wireframe ship through escalating asteroid waves, thread between fragments, and keep momentum under control while chasing longer runs and higher scores.</p>
+    <ul>
+      <li>Vulkan-rendered arcade action with wraparound arenas</li>
+      <li>Keyboard, mouse, and touchpad control layouts</li>
+      <li>Profiles, persistent settings, and run stat tracking</li>
+    </ul>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Placeholder gameplay scene for the first Flathub-ready package pass</caption>
+      <image type="source" width="1280" height="720">https://raw.githubusercontent.com/aj-floater/starshard-05/main/docs/flathub/screenshot-main.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <branding>
+    <color type="primary" scheme_preference="light">#0fa5c9</color>
+    <color type="primary" scheme_preference="dark">#11d7ff</color>
+  </branding>
+  <releases>
+    <release version="0.1.0" date="2026-05-02">
+      <description>
+        <p>First Flathub-ready release with installable Linux metadata, sandbox packaging, and packaged shader assets.</p>
+      </description>
+    </release>
+  </releases>
+  <url type="homepage">https://github.com/aj-floater/starshard-05</url>
+  <url type="bugtracker">https://github.com/aj-floater/starshard-05/issues</url>
+  <url type="vcs-browser">https://github.com/aj-floater/starshard-05</url>
+</component>

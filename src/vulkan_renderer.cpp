@@ -1,11 +1,14 @@
 #include "vulkan_renderer.h"
 
+#include "app_identity.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <numbers>
@@ -14,8 +17,12 @@
 #include <string>
 #include <vector>
 
-#ifndef ASTEROIDS_SHADER_DIR
-#define ASTEROIDS_SHADER_DIR "shaders"
+#ifndef STARSHARD_SHADER_BUILD_DIR
+#define STARSHARD_SHADER_BUILD_DIR "shaders"
+#endif
+
+#ifndef STARSHARD_SHADER_INSTALL_DIR
+#define STARSHARD_SHADER_INSTALL_DIR "shaders"
 #endif
 
 namespace {
@@ -75,6 +82,43 @@ VkPipelineColorBlendAttachmentState additive_blend_attachment() {
 float next_random(std::uint32_t& state) {
     state = 1664525u * state + 1013904223u;
     return static_cast<float>(state & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
+}
+
+std::vector<std::filesystem::path> shader_search_directories() {
+    std::vector<std::filesystem::path> directories;
+    directories.reserve(3);
+
+    auto append = [&](const char* value) {
+        const std::filesystem::path candidate(value);
+        if (std::find(directories.begin(), directories.end(), candidate) == directories.end()) {
+            directories.push_back(candidate);
+        }
+    };
+
+    append(STARSHARD_SHADER_BUILD_DIR);
+    append(STARSHARD_SHADER_INSTALL_DIR);
+    append("shaders");
+    return directories;
+}
+
+std::filesystem::path resolve_shader_path(const char* fileName) {
+    std::error_code error;
+    const std::vector<std::filesystem::path> directories = shader_search_directories();
+    for (const auto& directory : directories) {
+        const std::filesystem::path candidate = directory / fileName;
+        if (std::filesystem::exists(candidate, error)) {
+            return candidate;
+        }
+    }
+
+    std::string message = "Failed to locate shader file ";
+    message += fileName;
+    message += ". Searched:";
+    for (const auto& directory : directories) {
+        message += " ";
+        message += directory.string();
+    }
+    throw std::runtime_error(message);
 }
 
 }
@@ -473,7 +517,7 @@ void VulkanRenderer::shutdown() {
 void VulkanRenderer::create_instance() {
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = "Asteroids";
+    appInfo.pApplicationName = AppIdentity::kDisplayName;
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "None";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
@@ -861,22 +905,26 @@ void VulkanRenderer::create_offscreen_targets() {
 }
 
 void VulkanRenderer::create_pipelines() {
-    const std::vector<char> starVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/star.vert.spv");
-    const std::vector<char> starFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/star.frag.spv");
-    const std::vector<char> asteroidVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/asteroid.vert.spv");
-    const std::vector<char> asteroidFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/asteroid.frag.spv");
-    const std::vector<char> shipVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/ship.vert.spv");
-    const std::vector<char> shipFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/ship.frag.spv");
-    const std::vector<char> particleVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/particle.vert.spv");
-    const std::vector<char> particleSceneFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/particle.frag.spv");
-    const std::vector<char> particleLightVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/particle_light.vert.spv");
-    const std::vector<char> particleLightFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/particle_light.frag.spv");
-    const std::vector<char> fullscreenVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/fullscreen.vert.spv");
-    const std::vector<char> blurFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/blur.frag.spv");
-    const std::vector<char> compositeFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/composite.frag.spv");
-    const std::vector<char> hudVertShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/hud.vert.spv");
-    const std::vector<char> hudFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/hud.frag.spv");
-    const std::vector<char> menuHudFragShaderCode = read_binary_file(std::string(ASTEROIDS_SHADER_DIR) + "/menu_hud.frag.spv");
+    const auto read_shader = [&](const char* fileName) {
+        return read_binary_file(resolve_shader_path(fileName).string());
+    };
+
+    const std::vector<char> starVertShaderCode = read_shader("star.vert.spv");
+    const std::vector<char> starFragShaderCode = read_shader("star.frag.spv");
+    const std::vector<char> asteroidVertShaderCode = read_shader("asteroid.vert.spv");
+    const std::vector<char> asteroidFragShaderCode = read_shader("asteroid.frag.spv");
+    const std::vector<char> shipVertShaderCode = read_shader("ship.vert.spv");
+    const std::vector<char> shipFragShaderCode = read_shader("ship.frag.spv");
+    const std::vector<char> particleVertShaderCode = read_shader("particle.vert.spv");
+    const std::vector<char> particleSceneFragShaderCode = read_shader("particle.frag.spv");
+    const std::vector<char> particleLightVertShaderCode = read_shader("particle_light.vert.spv");
+    const std::vector<char> particleLightFragShaderCode = read_shader("particle_light.frag.spv");
+    const std::vector<char> fullscreenVertShaderCode = read_shader("fullscreen.vert.spv");
+    const std::vector<char> blurFragShaderCode = read_shader("blur.frag.spv");
+    const std::vector<char> compositeFragShaderCode = read_shader("composite.frag.spv");
+    const std::vector<char> hudVertShaderCode = read_shader("hud.vert.spv");
+    const std::vector<char> hudFragShaderCode = read_shader("hud.frag.spv");
+    const std::vector<char> menuHudFragShaderCode = read_shader("menu_hud.frag.spv");
 
     const VkShaderModule starVertModule = create_shader_module(starVertShaderCode);
     const VkShaderModule starFragModule = create_shader_module(starFragShaderCode);
@@ -2747,6 +2795,24 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
                 lr(0.2f, 1.15f, 0.8f, 1.45f);
                 letterWidth = 0.7f;
                 break;
+            case '+':
+                lr(0.28f, 0.78f, 0.44f, 1.02f);
+                lr(0.16f, 0.90f, 0.56f, 1.14f);
+                lr(0.28f, 1.02f, 0.44f, 1.26f);
+                letterWidth = 0.72f;
+                break;
+            case '-':
+                lr(0.12f, 0.90f, 0.60f, 1.14f);
+                letterWidth = 0.72f;
+                break;
+            case '/':
+                lr(0.50f, 0.0f, 0.72f, 0.24f);
+                lr(0.38f, 0.36f, 0.60f, 0.60f);
+                lr(0.26f, 0.72f, 0.48f, 0.96f);
+                lr(0.14f, 1.08f, 0.36f, 1.32f);
+                lr(0.02f, 1.44f, 0.24f, 1.68f);
+                letterWidth = 0.72f;
+                break;
             case ' ':
                 letterWidth = 0.5f;
                 break;
@@ -2770,6 +2836,9 @@ void VulkanRenderer::update_menu_buffer(const MenuOverlayState& menuOverlay) {
                 case 'W': letterWidth = 1.2f; break;
                 case '1': letterWidth = 0.65f; break;
                 case ':': letterWidth = 0.7f; break;
+                case '+': letterWidth = 0.72f; break;
+                case '-': letterWidth = 0.72f; break;
+                case '/': letterWidth = 0.72f; break;
                 case ' ': letterWidth = 0.5f; break;
                 default: break;
             }

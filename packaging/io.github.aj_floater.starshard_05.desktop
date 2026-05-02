@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Starshard 05
+Comment=Retro arcade space shooter with inertia and wraparound combat
+Exec=starshard-05
+Icon=io.github.aj_floater.starshard_05
+Terminal=false
+Categories=Game;ArcadeGame;
+Keywords=arcade;space;shooter;retro;vector;asteroid;thrust;wraparound;
+StartupNotify=false

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1280" height="720" viewBox="0 0 1280 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="space" x1="110" y1="32" x2="1143" y2="670" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07131F"/>
+      <stop offset="1" stop-color="#02060C"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="390" y1="170" x2="783" y2="500" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17D4FF"/>
+      <stop offset="1" stop-color="#7AF58E"/>
+    </linearGradient>
+    <linearGradient id="warning" x1="824" y1="180" x2="1027" y2="351" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD86B"/>
+      <stop offset="1" stop-color="#FF8850"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" rx="18" fill="url(#space)"/>
+  <path d="M111 101H1167" stroke="#0E3242" stroke-width="2"/>
+  <path d="M111 620H1167" stroke="#0E3242" stroke-width="2"/>
+  <path d="M150 140L158 146" stroke="#1ED7FF" stroke-width="4" stroke-linecap="round"/>
+  <path d="M207 96L210 104" stroke="#1ED7FF" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="244" cy="585" r="5" fill="#FFD86B"/>
+  <circle cx="964" cy="109" r="4" fill="#1ED7FF"/>
+  <circle cx="1113" cy="521" r="6" fill="#1ED7FF"/>
+  <circle cx="1054" cy="231" r="3" fill="#FFD86B"/>
+  <path d="M318 469L427 249L603 183L560 314L701 379L530 487L474 582L421 458L318 469Z" stroke="url(#pulse)" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M875 177L959 201L992 279L936 352L840 336L802 252L875 177Z" stroke="url(#warning)" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M890 410L937 425L954 469L919 509L866 503L848 459L890 410Z" stroke="#F1D158" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M259 262L305 273L322 315L287 355L239 347L222 301L259 262Z" stroke="#F1D158" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M782 118C859 157 932 249 970 348" stroke="#0F536B" stroke-width="4" stroke-linecap="round" stroke-dasharray="10 14"/>
+  <path d="M204 565C338 500 515 480 667 513" stroke="#0F536B" stroke-width="4" stroke-linecap="round" stroke-dasharray="10 14"/>
+  <rect x="104" y="71" width="386" height="92" rx="18" fill="#071B27" stroke="#0E3242" stroke-width="3"/>
+  <text x="136" y="128" fill="#F8FBFF" font-size="44" font-family="DejaVu Sans Mono, monospace" letter-spacing="4">STARSHARD 05</text>
+  <rect x="1015" y="82" width="150" height="70" rx="18" fill="#071B27" stroke="#0E3242" stroke-width="3"/>
+  <text x="1055" y="126" fill="#17D4FF" font-size="34" font-family="DejaVu Sans Mono, monospace">12740</text>
+  <rect x="1004" y="532" width="180" height="102" rx="20" fill="#071B27" stroke="#0E3242" stroke-width="3"/>
+  <text x="1041" y="576" fill="#8DB5C8" font-size="24" font-family="DejaVu Sans Mono, monospace">WAVE</text>
+  <text x="1071" y="618" fill="#F8FBFF" font-size="38" font-family="DejaVu Sans Mono, monospace">06</text>
+  <rect x="110" y="533" width="232" height="102" rx="20" fill="#071B27" stroke="#0E3242" stroke-width="3"/>
+  <text x="145" y="576" fill="#8DB5C8" font-size="24" font-family="DejaVu Sans Mono, monospace">CONTROL</text>
+  <text x="148" y="618" fill="#F8FBFF" font-size="32" font-family="DejaVu Sans Mono, monospace">MOUSE</text>
+</svg>
